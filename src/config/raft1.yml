@@ -1,0 +1,11 @@
+node_id: 1
+base_wal_dir: "./tmp/wal/deployd"
+base_data_dir: "./tmp/data/deployd"
+replica:
+  scheduler:
+    cluster:
+      - http://scheduler1:21521
+      - http://scheduler2:21522
+      - http://scheduler3:21523
+    bind_address: scheduler1:21521
+    join: false

@@ -1,0 +1,38 @@
+services:
+  scheduler1:
+    image: scheduler:latest
+    restart: on-failure
+    environment:
+      TZ: Asia/Jakarta
+      DEPLOYD_RAFT: /etc/deployd_scheduler/etcd-raft.yaml
+    volumes:
+      - ./src/config/raft1.yml:/etc/deployd_scheduler/etcd-raft.yaml
+    ports:
+      - "9501:9090"
+    command: ["./scheduler"]
+  scheduler2:
+    image: scheduler:latest
+    restart: on-failure
+    environment:
+      TZ: Asia/Jakarta
+      DEPLOYD_RAFT: /etc/deployd_scheduler/etcd-raft.yaml
+    volumes:
+      - ./src/config/raft2.yml:/etc/deployd_scheduler/etcd-raft.yaml
+    ports:
+      - "9502:9090"
+    command: ["./scheduler"]
+  scheduler3:
+    image: scheduler:latest
+    restart: on-failure
+    environment:
+      TZ: Asia/Jakarta
+      DEPLOYD_RAFT: /etc/deployd_scheduler/etcd-raft.yaml
+    volumes:
+      - ./src/config/raft3.yml:/etc/deployd_scheduler/etcd-raft.yaml
+    ports:
+      - "9503:9090"
+    command: ["./scheduler"]
+
+volumes:
+  config:
+    driver: local

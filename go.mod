@@ -5,7 +5,7 @@ go 1.26.0
 // replace github.com/desain-gratis/common => ../common
 
 require (
-	github.com/desain-gratis/common v0.0.0-20260928173101-b08714cfd57b
+	github.com/desain-gratis/common v0.0.0-20261004200551-742bd2477b84
 	github.com/dgraph-io/badger/v4 v4.9.6
 	github.com/julienschmidt/httprouter v1.3.0
 	github.com/rs/zerolog v1.34.0

@@ -16,12 +16,6 @@ import (
 	"github.com/dgraph-io/badger/v4"
 )
 
-// static
-const (
-	namespace = "deployd"
-	name      = "configure-website"
-)
-
 type Command string
 type Event string
 
@@ -29,13 +23,11 @@ const (
 	TableTaskDefinition = "task_definition"
 	TableTaskExecution  = "task_execution"
 
-	Command_User_CreateTask   Command = "user.create-task"
 	Command_User_ScheduleTask Command = "user.schedule-task"
-	Command_User_ExecuteTask  Command = "user.execute-task" // can be from cron/scheduler
 
-	Command_User_UpdateTaskExecution Command = "user.update-task-execution"
-
-	Query_User_CanExecute Command = "user.check-query"
+	Command_Leader_InitiateTask Command = "leader.initiate-task-execution"
+	Command_Worker_ExecuteTask  Command = "worker.execute-task"
+	Command_Worker_UpdateTask   Command = "worker.update-task"
 )
 
 var _ raft.ApplicationV2 = (*RaftApp)(nil)
@@ -43,15 +35,8 @@ var _ raft.ApplicationV2 = (*RaftApp)(nil)
 type RaftApp struct {
 	topic notifier.Topic
 
-	// jobCache   *expirable.LRU[jobKey, *entity.JobConfigureWebsite]
 	taskDefinitionUsecase *mycontent_base.Handler[*entity.TaskDefinition]
 	taskExecutionUsecase  *mycontent_base.Handler[*entity.TaskExecution]
-}
-
-type jobKey struct {
-	namespace string
-	service   string
-	id        string
 }
 
 type CommandWrapper struct {
@@ -65,12 +50,10 @@ var ErrRetryable = errors.New("retryable")
 
 func New(topic notifier.Topic, dbJob *badger.DB) *RaftApp {
 	taskDefinitionStorage := content_badger.NewAutoIncrement(dbJob, TableTaskDefinition, 0)
-	taskExecutionStorage := content_badger.NewAutoIncrement(dbJob, TableTaskExecution, 1)
+	taskExecutionStorage := content_badger.NewAutoIncrement(dbJob, TableTaskExecution, 1) // refer to task definition
 
 	taskDefinitionUsecase := mycontent_base.New[*entity.TaskDefinition](taskDefinitionStorage)
 	taskExecutionUsecase := mycontent_base.New[*entity.TaskExecution](taskExecutionStorage)
-
-	// jobCache := expirable.NewLRU[jobKey, *entity.JobConfigureWebsite](256, nil, 20*time.Minute) // at least until the DB can catch up
 
 	return &RaftApp{
 		topic:                 topic,
@@ -119,17 +102,17 @@ func (m *RaftApp) OnUpdateV2(ctx context.Context, entry raft.EntryV2) (any, erro
 
 	switch cmd.Name {
 	case Command_User_ScheduleTask:
-		// input, err := parseAs[CommandScheduleTask](cmd.Value)
-		// if err != nil {
-		// return nil, err
-		// }
-		// 1. Of course write to table "scheduled_task" / "task_definition"
+		// 1. Of course write to table "task_definition"
 		// 2. Parse cron & get next scheduled execution time; write to "task_execution" table, with status "PENDING"
-
-	case Command_User_CreateTask:
-		fallthrough
-	case Command_User_ExecuteTask:
-		fallthrough
+	case Command_Leader_InitiateTask:
+		// 1. get task definition and the task execution id that will be executed (if not found we can err)
+		// 2. generate next execution id with status "PENDING"
+		// 3. broadcast leader_execute_task event for follower node / executor node to get a lock for this task_execution
+	case Command_Worker_ExecuteTask:
+		// 1. each worker race to take the lease; one winning or any other algorithm, it can start to run the task
+	case Command_Worker_UpdateTask:
+		// 1. Update task status & struct according to the job; also task completion checks, timeout checks, etc happened here.
+		// 2. Broadcast task execution update event
 	default:
 		return nil, fmt.Errorf("%w command: %s", errors.ErrUnsupported, cmd.Name)
 	}

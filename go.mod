@@ -2,10 +2,11 @@ module github.com/desain-gratis/deployd-app-scheduler
 
 go 1.26.0
 
-// replace github.com/desain-gratis/common => ../common
+replace github.com/desain-gratis/common => ../common
 
 require (
-	github.com/desain-gratis/common v0.0.0-20261004200551-742bd2477b84
+	github.com/arcward/crong v0.0.0-20240827163849-4abe2a5262db
+	github.com/desain-gratis/common v0.0.0-20261007205630-ce24f41152f7
 	github.com/dgraph-io/badger/v4 v4.9.6
 	github.com/julienschmidt/httprouter v1.3.0
 	github.com/rs/zerolog v1.34.0

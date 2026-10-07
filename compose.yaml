@@ -8,7 +8,7 @@ services:
     volumes:
       - ./src/config/raft1.yml:/etc/deployd_scheduler/etcd-raft.yaml
     ports:
-      - "9501:9090"
+      - "9501:9100"
     command: ["./scheduler"]
   scheduler2:
     image: scheduler:latest
@@ -19,7 +19,7 @@ services:
     volumes:
       - ./src/config/raft2.yml:/etc/deployd_scheduler/etcd-raft.yaml
     ports:
-      - "9502:9090"
+      - "9502:9100"
     command: ["./scheduler"]
   scheduler3:
     image: scheduler:latest
@@ -30,7 +30,7 @@ services:
     volumes:
       - ./src/config/raft3.yml:/etc/deployd_scheduler/etcd-raft.yaml
     ports:
-      - "9503:9090"
+      - "9503:9100"
     command: ["./scheduler"]
 
 volumes:

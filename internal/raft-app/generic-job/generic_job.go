@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"time"
 
 	mycontent_base "github.com/desain-gratis/common/delivery/mycontent-api/mycontent/base"
@@ -40,8 +39,8 @@ type RaftApp struct {
 }
 
 type CommandWrapper struct {
-	Name  Command `json:"name"`
-	Value []byte  `json:"value"`
+	Name  Command         `json:"name"`
+	Value json.RawMessage `json:"value"`
 }
 
 type ApplyResult func() (any, error)
@@ -49,7 +48,7 @@ type ApplyResult func() (any, error)
 var ErrRetryable = errors.New("retryable")
 
 func New(topic notifier.Topic, dbJob *badger.DB) *RaftApp {
-	taskDefinitionStorage := content_badger.NewAutoIncrement(dbJob, TableTaskDefinition, 0)
+	taskDefinitionStorage := content_badger.New(dbJob, TableTaskDefinition, 0)
 	taskExecutionStorage := content_badger.NewAutoIncrement(dbJob, TableTaskExecution, 1) // refer to task definition
 
 	taskDefinitionUsecase := mycontent_base.New[*entity.TaskDefinition](taskDefinitionStorage)
@@ -62,36 +61,12 @@ func New(topic notifier.Topic, dbJob *badger.DB) *RaftApp {
 	}
 }
 
-func OnLeader(ctx context.Context, term uint64, leaderID uint64) error {
-	ticker := time.NewTicker(1 * time.Second)
-
-	// Remember, this is outside of the state machine
-	go func(term, leaderID uint64) {
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ticker.C:
-				log.Printf("I'm ZA LEADER. IM POLLING FOR JOBSS SCHEDULE! term=%v leaderID=%v", term, leaderID)
-			case <-ctx.Done():
-				return
-			}
-		}
-	}(term, leaderID)
-
-	return nil
-}
-
 func (m *RaftApp) GetTaskDefinitionStore() *mycontent_base.Handler[*entity.TaskDefinition] {
 	return m.taskDefinitionUsecase
 }
 
 func (m *RaftApp) GetTaskExecution() *mycontent_base.Handler[*entity.TaskExecution] {
 	return m.taskExecutionUsecase
-}
-
-type CommandScheduleTask struct {
-	Cron   string `json:"cron"`
-	TaskID string `json:"task_id"`
 }
 
 func (m *RaftApp) OnUpdateV2(ctx context.Context, entry raft.EntryV2) (any, error) {
@@ -102,12 +77,20 @@ func (m *RaftApp) OnUpdateV2(ctx context.Context, entry raft.EntryV2) (any, erro
 
 	switch cmd.Name {
 	case Command_User_ScheduleTask:
-		// 1. Of course write to table "task_definition"
-		// 2. Parse cron & get next scheduled execution time; write to "task_execution" table, with status "PENDING"
+		data, err := parseAs[ScheduleTask](cmd.Value)
+		if err != nil {
+			return nil, err
+		}
+		return m.userScheduleTask(ctx, data)
 	case Command_Leader_InitiateTask:
 		// 1. get task definition and the task execution id that will be executed (if not found we can err)
 		// 2. generate next execution id with status "PENDING"
 		// 3. broadcast leader_execute_task event for follower node / executor node to get a lock for this task_execution
+		data, err := parseAs[InitiateTaskExecution](cmd.Value)
+		if err != nil {
+			return nil, err
+		}
+		return m.leaderInitiateTask(ctx, data)
 	case Command_Worker_ExecuteTask:
 		// 1. each worker race to take the lease; one winning or any other algorithm, it can start to run the task
 	case Command_Worker_UpdateTask:
@@ -120,7 +103,40 @@ func (m *RaftApp) OnUpdateV2(ctx context.Context, entry raft.EntryV2) (any, erro
 	return nil, fmt.Errorf("%w command: %s", errors.ErrUnsupported, cmd.Name)
 }
 
-func parseAs[T any](payload []byte) (T, error) {
+type ScheduleTask struct {
+	TaskDefinition entity.TaskDefinition `json:"task_definition"`
+	ServerTime     time.Time             `json:"server_time"`
+}
+type InitiateTaskExecution struct {
+	ExecutionID    string                `json:"execution_id"`
+	TaskDefinition entity.TaskDefinition `json:"task_definition"`
+}
+
+func (m *RaftApp) userScheduleTask(ctx context.Context, data ScheduleTask) (any, error) {
+	result, err := m.taskDefinitionUsecase.Post(ctx, &data.TaskDefinition, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	m.topic.Broadcast(ctx, result)
+
+	return result, nil
+}
+func (m *RaftApp) leaderInitiateTask(ctx context.Context, data InitiateTaskExecution) (any, error) {
+	dummy := &entity.TaskExecution{Ns: "hello"}
+	dummy.Id = data.ExecutionID
+	dummy.Ns = data.TaskDefinition.Ns
+	dummy.TaskID = data.TaskDefinition.Id
+	dummy.Status = entity.ExecutionStatusPending
+	result, err := m.taskExecutionUsecase.Post(ctx, dummy, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return result, nil
+}
+
+func parseAs[T any](payload json.RawMessage) (T, error) {
 	var t T
 	err := json.Unmarshal(payload, &t)
 	return t, err

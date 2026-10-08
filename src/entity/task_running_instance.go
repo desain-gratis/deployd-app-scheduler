@@ -14,12 +14,24 @@ type TaskExecution struct {
 
 	Id string `json:"id"`
 
-	Name        string `json:"name"`
-	Description string `json:"descprition"`
+	TaskID string `json:"task_id"`
+
+	ScheduledRunAt time.Time       `json:"scheduled_run_at"`
+	Status         ExecutionStatus `json:"status"`
 
 	PublishedAt time.Time `json:"published_at"`
 	URLx        string    `json:"url"`
 }
+
+type ExecutionStatus string
+
+const (
+	ExecutionStatusPending    ExecutionStatus = "PENDING"
+	ExecutionStatusInProgress ExecutionStatus = "IN_PROGRESS"
+	ExecutionStatusTimeout    ExecutionStatus = "TIMEOUT"
+	ExecutionStatusFailed     ExecutionStatus = "FAILED"
+	ExecutionStatusDone       ExecutionStatus = "DONE"
+)
 
 func (a *TaskExecution) CreatedTime() time.Time {
 	return a.PublishedAt
@@ -34,7 +46,7 @@ func (a *TaskExecution) Namespace() string {
 }
 
 func (a *TaskExecution) RefIDs() []string {
-	return nil
+	return []string{a.TaskID}
 }
 
 func (a *TaskExecution) URL() string {

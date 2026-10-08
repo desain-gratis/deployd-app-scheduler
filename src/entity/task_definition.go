@@ -17,6 +17,9 @@ type TaskDefinition struct {
 	Name        string `json:"name"`
 	Description string `json:"descprition"`
 
+	Cron     string    `json:"cron"`
+	UserTime time.Time `json:"user_time"` // for timezone
+
 	PublishedAt time.Time `json:"published_at"`
 	URLx        string    `json:"url"`
 }

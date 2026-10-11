@@ -12,7 +12,9 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 
+	notifier_impl "github.com/desain-gratis/common/lib/notifier/impl"
 	runneretcd "github.com/desain-gratis/common/lib/raft/runner-etcd"
+	genericjob_integration "github.com/desain-gratis/deployd-app-scheduler/internal/generic-job"
 	genericjob "github.com/desain-gratis/deployd-app-scheduler/internal/raft-app/generic-job"
 )
 
@@ -48,16 +50,31 @@ func main() {
 	log.Info().Msgf("bye bye")
 }
 
-func enableSchedulerModule(appCtx context.Context, router *httprouter.Router) {
+func enableSchedulerModule(ctx context.Context, router *httprouter.Router) {
 	db, err := badger.Open(badger.DefaultOptions("./tmp/scheduler.db"))
 	if err != nil {
 		log.Fatal().Msgf("UHUY %v", err)
 	}
 
-	jobApp := genericjob.New(nil, db)
-	_, _, err = runneretcd.RunWithConfigAll(appCtx, os.Getenv("DEPLOYD_RAFT"), "scheduler", jobApp, genericjob.OnLeader)
+	topic := notifier_impl.NewStandardTopic()
+
+	jobAppRaft, _, err := runneretcd.RunWithConfig(ctx, os.Getenv("DEPLOYD_RAFT"), "scheduler", genericjob.New(topic, db))
 	if err != nil {
-		log.Fatal().Msgf("err init raft: %v", err)
+		log.Fatal().Msgf("err running raft: %v", err)
 	}
 
+	worker := genericjob_integration.NewWorker(topic)
+	httpAPI := genericjob_integration.NewHttpAPI(topic, genericjob.NewClient(jobAppRaft))
+
+	err = worker.Run(ctx)
+	if err != nil {
+		log.Fatal().Msgf("err running integration: %v", err)
+	}
+	err = jobAppRaft.Run(ctx, worker.OnBecomingRaftLeader)
+	if err != nil {
+		log.Fatal().Msgf("err running raft: %v", err)
+	}
+
+	router.GET("/hello", httpAPI.Hello)
+	router.POST("/schedule", httpAPI.ScheduleTask)
 }

@@ -1,0 +1,11 @@
+{
+	"namespace": "deployd",
+    "id": "hehehe",
+	"name": "maknyus",
+	"description": "task yang paling maknyus",
+	"cron": "*/10 * * * *",
+	"user_time": "2026-10-08T15:04:05+07:00",
+	"published_at": "2026-10-08T15:04:05+07:00",
+	"url": ""
+}
+

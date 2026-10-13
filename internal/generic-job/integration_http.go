@@ -26,7 +26,7 @@ func (h *httpAPI) Hello(w http.ResponseWriter, r *http.Request, p httprouter.Par
 
 }
 
-func (h *httpAPI) ScheduleTask(w http.ResponseWriter, r *http.Request, p httprouter.Params) {
+func (h *httpAPI) CreateTask(w http.ResponseWriter, r *http.Request, p httprouter.Params) {
 	payload, err := io.ReadAll(r.Body)
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
@@ -43,7 +43,7 @@ func (h *httpAPI) ScheduleTask(w http.ResponseWriter, r *http.Request, p httprou
 	}
 	// taskUID := uuid.New()
 	// server do something
-	data := genericjob.ScheduleTask{
+	data := genericjob.CreateTask{
 		TaskDefinition: taskDefinition,
 		// NextExecutionUUID: taskUID.String(),
 		ServerTime: time.Now(),

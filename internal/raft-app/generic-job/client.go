@@ -23,10 +23,16 @@ func (c *Client) Propose(ctx context.Context, request any) (any, error) {
 	var command Command
 
 	switch req := request.(type) {
-	case ScheduleTask:
-		command = Command_User_ScheduleTask
+	case CreateTask:
+		command = Command_User_CreateTask
 	case InitiateTaskExecution:
 		command = Command_Leader_InitiateTask
+	case UpdateTask:
+		command = Command_Leader_UpdateTask
+	case RequestRegenerateTaskInstances:
+		command = Command_Leader_RequestRegenerateTaskExecution
+	case CreateTaskExecution:
+		command = Command_Leader_CreateTaskExecution
 	default:
 		return nil, fmt.Errorf("unsupported type %T", req)
 	}

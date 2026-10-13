@@ -58,12 +58,14 @@ func enableSchedulerModule(ctx context.Context, router *httprouter.Router) {
 
 	topic := notifier_impl.NewStandardTopic()
 
-	jobAppRaft, _, err := runneretcd.RunWithConfig(ctx, os.Getenv("DEPLOYD_RAFT"), "scheduler", genericjob.New(topic, db))
+	jobApp := genericjob.New(topic, db)
+
+	jobAppRaft, _, err := runneretcd.RunWithConfig(ctx, os.Getenv("DEPLOYD_RAFT"), "scheduler", jobApp)
 	if err != nil {
 		log.Fatal().Msgf("err running raft: %v", err)
 	}
 
-	worker := genericjob_integration.NewWorker(topic)
+	worker := genericjob_integration.NewWorker(topic, jobApp.GetTaskDefinitionStore(), jobApp.GetTaskExecutionStore())
 	httpAPI := genericjob_integration.NewHttpAPI(topic, genericjob.NewClient(jobAppRaft))
 
 	err = worker.Run(ctx)
@@ -76,5 +78,5 @@ func enableSchedulerModule(ctx context.Context, router *httprouter.Router) {
 	}
 
 	router.GET("/hello", httpAPI.Hello)
-	router.POST("/schedule", httpAPI.ScheduleTask)
+	router.POST("/schedule", httpAPI.CreateTask)
 }

@@ -26,6 +26,7 @@ type TaskExecution struct {
 type ExecutionStatus string
 
 const (
+	ExecutionStatusMissed     ExecutionStatus = "MISSED"
 	ExecutionStatusPending    ExecutionStatus = "PENDING"
 	ExecutionStatusInProgress ExecutionStatus = "IN_PROGRESS"
 	ExecutionStatusTimeout    ExecutionStatus = "TIMEOUT"

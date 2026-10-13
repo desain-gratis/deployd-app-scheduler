@@ -20,8 +20,16 @@ type TaskDefinition struct {
 	Cron     string    `json:"cron"`
 	UserTime time.Time `json:"user_time"` // for timezone
 
+	// used by server
+	State *TaskDefinitionState `json:"state"`
+
 	PublishedAt time.Time `json:"published_at"`
 	URLx        string    `json:"url"`
+}
+
+type TaskDefinitionState struct {
+	LastGenerateStart time.Time `json:"last_generate_start"`
+	LastGenerateEnd   time.Time `json:"last_generate_end"`
 }
 
 func (a *TaskDefinition) CreatedTime() time.Time {

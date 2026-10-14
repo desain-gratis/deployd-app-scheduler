@@ -203,25 +203,55 @@ func (ls *leaderState) generateTaskExecutionInstances(ctx context.Context, task 
 			status = entity.ExecutionStatusMissed // missed execution, we can ask user how to handle this using different strategies
 		}
 
-		_, err := ls.client.Propose(ctx,
-			genericjob.CreateTaskExecution{
-				Ns:             task.Ns,
-				Id:             execID,
-				TaskID:         task.Id,
-				ScheduledRunAt: next,
-				Status:         status,
-				PublishedAt:    serverTime,
-			},
-		)
+		state := genericjob.CreateTaskExecution{
+			Ns:             task.Ns,
+			Id:             execID,
+			TaskID:         task.Id,
+			ScheduledRunAt: next,
+			Status:         status,
+			PublishedAt:    serverTime,
+		}
+
+		_, err := ls.client.Propose(ctx, state)
 		if err != nil {
 			log.Printf("ERROR create task execution instance: %v\n", err)
 			continue
 		}
 
-		// TODO: move outside of this method, but via CreateTaskExecution listener
-		// todo: can handle cancellation
+		// TODO: move this to worker, via CreateTaskExecution listener; other worker resource allocation logic
+		// TODO: as well, handle task cancellation
 		tm := time.AfterFunc(time.Until(next), func() {
-			log.Printf(". \"%v\" (%v. %v) is now running!", execID, task.Id, task.Name)
+
+			// SAMPLE LOGIC FOR DOING TASK
+			runAt := time.Now()
+			state.ActualRunAt = &runAt
+			state.Status = entity.ExecutionStatusInProgress
+
+			// update before
+			_, err := ls.client.Propose(ctx, state)
+			if err != nil {
+				log.Printf("ERROR failed to update task execution instance: %v\n", err)
+				return
+			}
+
+			// execute
+			err = SampleTask(ctx, execID, task.Id, task.Name)
+			if err != nil {
+				state.Status = entity.ExecutionStatusFailed
+			} else {
+				state.Status = entity.ExecutionStatusDone
+			}
+
+			tComplete := time.Now()
+			state.CompletedAt = &tComplete
+
+			// update after
+			_, err = ls.client.Propose(ctx, state)
+			if err != nil {
+				// failed to inform cluster back. Leader's timeout mechanism will kick in.
+				log.Printf("ERROR failed to update task execution instance: %v\n", err)
+				return
+			}
 		})
 		func() {
 			defer ls.timersLock.Unlock()
@@ -269,6 +299,16 @@ func (ls *leaderState) scheduleNextGenerate(ctx context.Context, t time.Duration
 			return
 		}
 	})
+
+	return nil
+}
+
+func SampleTask(ctx context.Context, execID, taskId, taskName string) error {
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+
+	log.Printf(". \"%v\" (%v. %v) is now running!", execID, taskId, taskName)
 
 	return nil
 }

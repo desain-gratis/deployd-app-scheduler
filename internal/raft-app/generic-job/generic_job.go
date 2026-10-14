@@ -29,6 +29,7 @@ const (
 	Command_Leader_RequestRegenerateTaskExecution Command = "leader.request-regenerate-task-execution"
 
 	Command_Leader_CreateTaskExecution Command = "leader.task-execution.create"
+	Command_Worker_UpdateTaskExecution Command = "worker.task-execution.update"
 
 	// When leader started, it will submit this command
 	Command_Leader_UpdateLastSchedulingTime Command = "leader.update-last-scheduling-time"
@@ -112,11 +113,36 @@ func (m *RaftApp) OnUpdateV2(ctx context.Context, entry raft.EntryV2) (any, erro
 			return nil, err
 		}
 
-		t := (entity.TaskExecution)(data)
-		result, err := m.taskExecutionUsecase.Post(ctx, &t, nil)
+		t := (*entity.TaskExecution)(&data)
+		result, err := m.taskExecutionUsecase.Post(ctx, t, nil)
 		if err != nil {
 			return nil, err
 		}
+
+		return result, nil
+	case Command_Worker_UpdateTaskExecution:
+		data, err := parseAs[UpdateTaskExecution](cmd.Value)
+		if err != nil {
+			return nil, err
+		}
+
+		t := (*entity.TaskExecution)(&data)
+		getData, err := m.taskDefinitionUsecase.Get(ctx, t.Namespace(), t.RefIDs(), t.ID()) // check if it's found or not
+		if err != nil {
+			return nil, err
+		}
+		if len(getData) != 1 {
+			return nil, fmt.Errorf("task does not exist")
+		}
+
+		// TODO: change detection / delta
+
+		result, err := m.taskExecutionUsecase.Post(ctx, t, nil)
+		if err != nil {
+			return nil, err
+		}
+
+		// TODO: if changes detected, what is it, and publish respective event.
 
 		return result, nil
 	case Command_Leader_InitiateTask:
@@ -179,6 +205,7 @@ type InitiateTaskExecution struct {
 
 // TaskExecution Instance
 type CreateTaskExecution entity.TaskExecution
+type UpdateTaskExecution entity.TaskExecution
 
 type TimeRange struct {
 	Start time.Time `json:"start"`

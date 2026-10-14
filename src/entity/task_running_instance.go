@@ -17,6 +17,8 @@ type TaskExecution struct {
 	TaskID string `json:"task_id"`
 
 	ScheduledRunAt time.Time       `json:"scheduled_run_at"`
+	ActualRunAt    *time.Time      `json:"actual_run_at"`
+	CompletedAt    *time.Time      `json:"completed_at"`
 	Status         ExecutionStatus `json:"status"`
 
 	PublishedAt time.Time `json:"published_at"`

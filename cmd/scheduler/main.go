@@ -12,6 +12,7 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 
+	mycontentapi "github.com/desain-gratis/common/delivery/mycontent-api"
 	notifier_impl "github.com/desain-gratis/common/lib/notifier/impl"
 	runneretcd "github.com/desain-gratis/common/lib/raft/runner-etcd"
 	genericjob_integration "github.com/desain-gratis/deployd-app-scheduler/internal/generic-job"
@@ -65,7 +66,10 @@ func enableSchedulerModule(ctx context.Context, router *httprouter.Router) {
 		log.Fatal().Msgf("err running raft: %v", err)
 	}
 
-	worker := genericjob_integration.NewWorker(topic, jobApp.GetTaskDefinitionStore(), jobApp.GetTaskExecutionStore())
+	taskUsecase := jobApp.GetTaskDefinitionStore()
+	taskExecutionUsecase := jobApp.GetTaskExecutionStore()
+
+	worker := genericjob_integration.NewWorker(topic, taskUsecase, taskExecutionUsecase)
 	httpAPI := genericjob_integration.NewHttpAPI(topic, genericjob.NewClient(jobAppRaft))
 
 	err = worker.Run(ctx)
@@ -77,6 +81,12 @@ func enableSchedulerModule(ctx context.Context, router *httprouter.Router) {
 		log.Fatal().Msgf("err running raft: %v", err)
 	}
 
+	taskHandler := mycontentapi.New(taskUsecase, publicBaseURL+"/task", nil)
+	taskExecutionHandler := mycontentapi.New(taskExecutionUsecase, publicBaseURL+"/task/instance", []string{"task_id"})
+
 	router.GET("/hello", httpAPI.Hello)
 	router.POST("/schedule", httpAPI.CreateTask)
+
+	router.GET("/task", taskHandler.Get)
+	router.GET("/task/instance", taskExecutionHandler.Get)
 }

@@ -35,6 +35,8 @@ func (c *Client) Propose(ctx context.Context, request any) (any, error) {
 		command = Command_Leader_CreateTaskExecution
 	case UpdateTaskExecution:
 		command = Command_Worker_UpdateTaskExecution
+	case RequestWork:
+		command = Command_Worker_RequestWork
 	default:
 		return nil, fmt.Errorf("unsupported type %T", req)
 	}

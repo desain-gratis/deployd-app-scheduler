@@ -30,7 +30,7 @@ const (
 
 	Command_Leader_CreateTaskExecution Command = "leader.task-execution.create"
 	Command_Worker_UpdateTaskExecution Command = "worker.task-execution.update"
-
+	Command_Worker_RequestWork         Command = "worker.request-work"
 	// When leader started, it will submit this command
 	Command_Leader_UpdateLastSchedulingTime Command = "leader.update-last-scheduling-time"
 
@@ -59,6 +59,24 @@ type CommandWrapper struct {
 }
 
 type ApplyResult func() (any, error)
+
+type EventTaskCreated *entity.Task
+type EventTaskUpdated *entity.Task
+type EventTaskNeedRegenerate *entity.Task
+
+type EventTaskExecutionCreated *entity.TaskExecution
+
+type EventWorkAssigned struct {
+	WorkerID  string // the worker that should do the work
+	QueueID   string // each work only for one queue
+	TaskExecs []*entity.TaskExecution
+}
+
+type EventWorkCreatedScheduledTask struct {
+	ScheduledRunAt time.Time
+	Queue          string
+	Tasks          []*entity.TaskExecution
+}
 
 var ErrRetryable = errors.New("retryable")
 
@@ -113,11 +131,13 @@ func (m *RaftApp) OnUpdateV2(ctx context.Context, entry raft.EntryV2) (any, erro
 			return nil, err
 		}
 
-		t := (*entity.TaskExecution)(&data)
+		t := (*entity.TaskExecution)(data)
 		result, err := m.taskExecutionUsecase.Post(ctx, t, nil)
 		if err != nil {
 			return nil, err
 		}
+
+		m.topic.Broadcast(ctx, EventTaskExecutionCreated(result))
 
 		return result, nil
 	case Command_Worker_UpdateTaskExecution:
@@ -126,8 +146,8 @@ func (m *RaftApp) OnUpdateV2(ctx context.Context, entry raft.EntryV2) (any, erro
 			return nil, err
 		}
 
-		t := (*entity.TaskExecution)(&data)
-		getData, err := m.taskDefinitionUsecase.Get(ctx, t.Namespace(), t.RefIDs(), t.ID()) // check if it's found or not
+		t := (*entity.TaskExecution)(data)
+		getData, err := m.taskExecutionUsecase.Get(ctx, t.Namespace(), t.RefIDs(), t.ID()) // simple check if it's found or not
 		if err != nil {
 			return nil, err
 		}
@@ -170,6 +190,63 @@ func (m *RaftApp) OnUpdateV2(ctx context.Context, entry raft.EntryV2) (any, erro
 		}
 
 		return "SUCCESS", nil
+	case Command_Worker_RequestWork:
+		rw, err := parseAs[RequestWork](cmd.Value)
+		if err != nil {
+			return nil, err
+		}
+
+		// a worker request some wok
+		// for now, let's just give work immediately
+		// but later we can provide many strategy depending on worker state/preferences & the task itself (matching)
+		// store worker's state & availability & task splitting logic, etc..
+
+		// maybe we only filter pending; we only filter
+
+		// for now, we use "First-Come First-Serve" strategy
+		// we should use different storage (not my-content), better used for queue for this
+		// to be able to easily filter PENDING task, etc.
+		// or filter TIMEOUT tasks from worker, and release it from that worker and assigned to this new worker etc..
+		taskExecs, err := m.taskExecutionUsecase.Get(ctx, rw.Namespace, []string{rw.QueueID}, "")
+		if err != nil {
+			return nil, err
+		}
+
+		// todo: in storage layer directly~
+		filtered := make([]*entity.TaskExecution, 0, len(taskExecs))
+		for _, pendingTaskExec := range taskExecs {
+			if pendingTaskExec.Status != entity.ExecutionStatusPending {
+				continue
+			}
+
+			if pendingTaskExec.State != nil && pendingTaskExec.State.AssignedWorker != "" {
+				// already have worker there
+				continue
+			}
+
+			// filter only in the next 1 hour maybe~~~
+
+			pendingTaskExec.State = &entity.TaskExecutionState{
+				AssignedWorker: rw.WorkerID,
+			}
+
+			filtered = append(filtered, pendingTaskExec)
+
+			// todo: in storage layer directly~
+			_, err := m.taskExecutionUsecase.Post(ctx, pendingTaskExec, nil)
+			if err != nil {
+				return nil, err
+			}
+		}
+
+		// since we want async later (based on various strategy, we use topic, not direct reply)
+		m.topic.Broadcast(ctx, EventWorkAssigned{
+			WorkerID:  rw.WorkerID,
+			QueueID:   rw.QueueID,
+			TaskExecs: filtered,
+		})
+
+		return "SUCCESS BRUH", nil
 	case Command_Worker_ExecuteTask:
 		// 1. each worker race to take the lease; one winning or any other algorithm, it can start to run the task
 	case Command_Worker_UpdateTask:
@@ -204,9 +281,18 @@ type InitiateTaskExecution struct {
 }
 
 // TaskExecution Instance
-type CreateTaskExecution entity.TaskExecution
-type UpdateTaskExecution entity.TaskExecution
+type CreateTaskExecution *entity.TaskExecution
+type UpdateTaskExecution *entity.TaskExecution
+type RequestWork struct {
+	// queue name & capacity
+	Namespace string
 
+	WorkerID string
+	QueueID  string
+	Count    uint64 // arbitrary unit
+
+	// location, preferences, etc...
+}
 type TimeRange struct {
 	Start time.Time `json:"start"`
 	End   time.Time `json:"end"`
@@ -216,27 +302,12 @@ type UpdateLastSchedulingTime struct {
 	Time time.Time `json:"time"`
 }
 
-// pada saat scheduled task 7, snapshotting berjalan. Jadi, snapshot index nya itu 7 di dalam snapshot.
-// kemudian kita tambah2 sampai task count nya 9.... (sekarang)
-
-// kemudian kita matikan satu node
-
-// kemudain aku tambah 3 ke yang masih aktif sehingga ...
-// 2026-10-11 11:02:50.016076 I | SCHEDULED TASK COUNT: 11
-// 2026-10-11 11:02:50.277861 I | SCHEDULED TASK COUNT: 12
-
-// NAH. di node yang baru hidup lagi, dia sekarang 2026-10-11 11:03:41.602226 I | SCHEDULED TASK COUNT: 5 !!!!
-
-type EventTaskCreated *entity.Task
-type EventTaskUpdated *entity.Task
-type EventTaskNeedRegenerate *entity.Task
-
 func (m *RaftApp) userCreateTask(ctx context.Context, data CreateTask, idx uint64, mode string) (any, error) {
 	// THIS ONE JUST TO PLAY WITH RAFT
 
-	// overwrite ID
+	// overwrite ID // just for testing
 	m.scheduledTaskCount++
-	data.Task.Id = fmt.Sprintf("%d", m.scheduledTaskCount)
+	// data.Task.Id = fmt.Sprintf("%d", m.scheduledTaskCount)
 
 	result, err := m.taskDefinitionUsecase.Post(ctx, &data.Task, nil)
 	if err != nil {
@@ -256,7 +327,7 @@ func (m *RaftApp) leaderInitiateTask(ctx context.Context, data InitiateTaskExecu
 	dummy := &entity.TaskExecution{Ns: "hello"}
 	dummy.Id = data.ExecutionID
 	dummy.Ns = data.Task.Ns
-	dummy.TaskID = data.Task.Id
+	dummy.QueueID = data.Task.Id
 	dummy.Status = entity.ExecutionStatusPending
 	result, err := m.taskExecutionUsecase.Post(ctx, dummy, nil)
 	if err != nil {

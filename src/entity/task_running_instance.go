@@ -14,15 +14,22 @@ type TaskExecution struct {
 
 	Id string `json:"id"`
 
-	TaskID string `json:"task_id"`
+	TaskID  string `json:"task_id"`
+	QueueID string `json:"queue_id"`
 
 	ScheduledRunAt time.Time       `json:"scheduled_run_at"`
 	ActualRunAt    *time.Time      `json:"actual_run_at"`
 	CompletedAt    *time.Time      `json:"completed_at"`
 	Status         ExecutionStatus `json:"status"`
 
+	State *TaskExecutionState `json:"state"`
+
 	PublishedAt time.Time `json:"published_at"`
 	URLx        string    `json:"url"`
+}
+
+type TaskExecutionState struct {
+	AssignedWorker string `json:"assigned_worker"`
 }
 
 type ExecutionStatus string
@@ -49,7 +56,7 @@ func (a *TaskExecution) Namespace() string {
 }
 
 func (a *TaskExecution) RefIDs() []string {
-	return []string{a.TaskID}
+	return []string{a.QueueID} // not include task ID expected
 }
 
 func (a *TaskExecution) URL() string {

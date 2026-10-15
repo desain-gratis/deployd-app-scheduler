@@ -72,7 +72,7 @@ func enableSchedulerModule(ctx context.Context, router *httprouter.Router) {
 	worker := genericjob_integration.NewWorker(topic, taskUsecase, taskExecutionUsecase)
 	httpAPI := genericjob_integration.NewHttpAPI(topic, genericjob.NewClient(jobAppRaft))
 
-	err = worker.Run(ctx)
+	err = worker.Run(ctx, genericjob.NewClient(jobAppRaft))
 	if err != nil {
 		log.Fatal().Msgf("err running integration: %v", err)
 	}
@@ -82,7 +82,7 @@ func enableSchedulerModule(ctx context.Context, router *httprouter.Router) {
 	}
 
 	taskHandler := mycontentapi.New(taskUsecase, publicBaseURL+"/task", nil)
-	taskExecutionHandler := mycontentapi.New(taskExecutionUsecase, publicBaseURL+"/task/instance", []string{"task_id"})
+	taskExecutionHandler := mycontentapi.New(taskExecutionUsecase, publicBaseURL+"/task/instance", []string{"queue_id"})
 
 	router.GET("/hello", httpAPI.Hello)
 	router.POST("/schedule", httpAPI.CreateTask)

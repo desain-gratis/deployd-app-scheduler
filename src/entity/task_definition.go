@@ -15,7 +15,8 @@ type Task struct {
 
 	Id string `json:"id"`
 
-	// task queue name, eg. sendInvoice()
+	// task queue/channel name, eg. sendInvoice()
+	// is the task queue that worker can pickup
 	QueueID    string `json:"queue_id"`
 	QueueParam any    `json:"queue_param,omitempty"`
 
@@ -33,6 +34,11 @@ type Task struct {
 	URLx        string    `json:"url"`
 }
 
+type Queue struct {
+	ID    string `json:"id"`
+	Param any    `json:"param"`
+}
+
 type ExecutionStrategy string
 
 const (
@@ -42,21 +48,21 @@ const (
 	// Scheduled execution
 	ExecutionStrategyScheduled = "SCHEDULED"
 
-	// Execute when parent task finished
-	ExecutionStrategyParent = "PARENT"
+	// Scheduled execution for a particular point in the future
+	ExecutionStrategyPointInTime = "POINT_IN_TIME"
 )
 
 type ExecutionStrategyInput struct {
-	Scheduled *ExecutionStrategyInputScheduled `json:"scheduled,omitempty"`
-	Parent    *ExecutionStrategyInputParent    `json:"parent,omitempty"`
+	Scheduled   *ExecutionStrategyInputScheduled   `json:"scheduled,omitempty"`
+	PointInTime *ExecutionStrategyInputPointInTime `json:"point_in_time,omitempty"`
 }
 
 type ExecutionStrategyInputScheduled struct {
 	Cron string `json:"cron"`
 }
 
-type ExecutionStrategyInputParent struct {
-	ParentTaskIDs []string `json:"parent_task_ids"`
+type ExecutionStrategyInputPointInTime struct {
+	Time time.Time `json:"time"`
 }
 
 type TaskState struct {

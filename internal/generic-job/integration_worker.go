@@ -23,14 +23,14 @@ type worker struct {
 	topic    notifier.Topic
 	toLeader chan string
 
-	taskDefinitionStoreRO *mycontent_base.Handler[*entity.TaskDefinition]
+	taskDefinitionStoreRO *mycontent_base.Handler[*entity.Task]
 	taskExecutionStoreRO  *mycontent_base.Handler[*entity.TaskExecution]
 }
 
 // or background process I guess
 func NewWorker(
 	topic notifier.Topic,
-	taskDefinitionStoreRO *mycontent_base.Handler[*entity.TaskDefinition],
+	taskDefinitionStoreRO *mycontent_base.Handler[*entity.Task],
 	taskExecutionStoreRO *mycontent_base.Handler[*entity.TaskExecution],
 ) *worker {
 	return &worker{
@@ -108,8 +108,13 @@ func (w *worker) OnBecomingRaftLeader(ctx context.Context, term uint64, leaderID
 				switch evt := msg.(type) {
 				case genericjob.EventTaskCreated, genericjob.EventTaskNeedRegenerate:
 					log.Printf("A new task definition has come. I better schedule! %+v", evt)
-					task := getTaskDefinition(evt)
-					err := ls.generateTaskExecutionInstances(ctx, task, t)
+					task := getTask(evt)
+					if task.ExecutionStrategy != entity.ExecutionStrategyScheduled {
+						log.Printf("[warn] unsupported execution strategy: %v", task.ExecutionStrategy)
+						continue
+					}
+
+					err := ls.generateScheduledTaskExecutionInstances(ctx, task, t)
 					if err != nil {
 						log.Printf("ERR SCHEDULE %v", err)
 						continue
@@ -129,12 +134,12 @@ func (w *worker) OnBecomingRaftLeader(ctx context.Context, term uint64, leaderID
 }
 
 // utility to retrieve task from task-ish alias
-func getTaskDefinition(taskish any) *entity.TaskDefinition {
+func getTask(taskish any) *entity.Task {
 	switch task := taskish.(type) {
 	case genericjob.EventTaskCreated:
-		return (*entity.TaskDefinition)(task)
+		return (*entity.Task)(task)
 	case genericjob.EventTaskUpdated:
-		return (*entity.TaskDefinition)(task)
+		return (*entity.Task)(task)
 	}
 
 	return nil
@@ -148,7 +153,7 @@ type leaderState struct {
 	term       uint64
 }
 
-func (ls *leaderState) cancelAllScheduledExecutions(ctx context.Context, task *entity.TaskDefinition) error {
+func (ls *leaderState) cancelAllScheduledExecutions(ctx context.Context, task *entity.Task) error {
 	// TODO:
 	// maybe the cron definition changed, or manually cancelled (I don't want to run this tasks.)
 	// only if it's already in memory ofcourse
@@ -157,7 +162,11 @@ func (ls *leaderState) cancelAllScheduledExecutions(ctx context.Context, task *e
 
 // schedule the task that is already in memory.
 // currentTime usually same as t0
-func (ls *leaderState) generateTaskExecutionInstances(ctx context.Context, task *entity.TaskDefinition, serverTime time.Time) error {
+func (ls *leaderState) generateScheduledTaskExecutionInstances(ctx context.Context, task *entity.Task, serverTime time.Time) error {
+
+	// TODO SUPER: right now we implement the scheduled task first.
+	// need to switch case based on strategy later ~
+
 	if task == nil {
 		return fmt.Errorf("empty task definition")
 	}
@@ -181,7 +190,7 @@ func (ls *leaderState) generateTaskExecutionInstances(ctx context.Context, task 
 	t1 := serverTime.AddDate(1, 0, 0) // GENERATE FOR FULL YEAR (PLANNED)
 
 	loc := task.UserTime.Location() // schedule relative to Task's location / time zone
-	schedule, err := crong.New(task.Cron, loc)
+	schedule, err := crong.New(task.ExecutionStrategyInput.Scheduled.Cron, loc)
 	if err != nil {
 		return err
 	}
@@ -235,7 +244,7 @@ func (ls *leaderState) generateTaskExecutionInstances(ctx context.Context, task 
 			}
 
 			// execute
-			err = SampleTask(ctx, execID, task.Id, task.Name)
+			err = SampleTask(ctx, execID, task.Id)
 			if err != nil {
 				state.Status = entity.ExecutionStatusFailed
 			} else {
@@ -265,14 +274,14 @@ func (ls *leaderState) generateTaskExecutionInstances(ctx context.Context, task 
 	log.Printf("Scheduled %v task execution instance(s): %v. Updating the task.", count, execTimes)
 
 	// Update the task definition state
-	task.State = &entity.TaskDefinitionState{
+	task.State = &entity.TaskState{
 		LastGenerateStart: t0,
 		LastGenerateEnd:   lastGeneratedEnd,
 	}
 
 	result, err := ls.client.Propose(ctx, genericjob.UpdateTask{
-		TaskDefinition: *task,
-		ServerTime:     serverTime,
+		Task:       *task,
+		ServerTime: serverTime,
 	})
 	if err != nil {
 		log.Printf("ERROR update task %v", err)
@@ -289,7 +298,7 @@ func (ls *leaderState) generateTaskExecutionInstances(ctx context.Context, task 
 	return nil
 }
 
-func (ls *leaderState) scheduleNextGenerate(ctx context.Context, t time.Duration, task *entity.TaskDefinition) error {
+func (ls *leaderState) scheduleNextGenerate(ctx context.Context, t time.Duration, task *entity.Task) error {
 	// Schedule for next generate trigger for this task
 	_ = time.AfterFunc(t, func() {
 		// to trigger the tick
@@ -303,12 +312,12 @@ func (ls *leaderState) scheduleNextGenerate(ctx context.Context, t time.Duration
 	return nil
 }
 
-func SampleTask(ctx context.Context, execID, taskId, taskName string) error {
+func SampleTask(ctx context.Context, execID, taskId string) error {
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
 
-	log.Printf(". \"%v\" (%v. %v) is now running!", execID, taskId, taskName)
+	log.Printf(". \"%v\" (%v) is now running!", execID, taskId)
 
 	return nil
 }

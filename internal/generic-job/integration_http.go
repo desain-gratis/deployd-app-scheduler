@@ -10,6 +10,7 @@ import (
 	"github.com/desain-gratis/common/lib/notifier"
 	genericjob "github.com/desain-gratis/deployd-app-scheduler/internal/raft-app/generic-job"
 	"github.com/desain-gratis/deployd-app-scheduler/src/entity"
+	"github.com/google/uuid"
 	"github.com/julienschmidt/httprouter"
 )
 
@@ -34,18 +35,19 @@ func (h *httpAPI) CreateTask(w http.ResponseWriter, r *http.Request, p httproute
 		return
 	}
 
-	var taskDefinition entity.TaskDefinition
+	var taskDefinition entity.Task
 	err = json.Unmarshal(payload, &taskDefinition)
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		fmt.Fprintf(w, "WADUUH: %v", err)
 		return
 	}
-	// taskUID := uuid.New()
+
+	taskDefinition.Id = uuid.NewString()
+
 	// server do something
 	data := genericjob.CreateTask{
-		TaskDefinition: taskDefinition,
-		// NextExecutionUUID: taskUID.String(),
+		Task:       taskDefinition,
 		ServerTime: time.Now(),
 	}
 

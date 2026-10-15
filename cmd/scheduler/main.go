@@ -66,7 +66,7 @@ func enableSchedulerModule(ctx context.Context, router *httprouter.Router) {
 		log.Fatal().Msgf("err running raft: %v", err)
 	}
 
-	taskUsecase := jobApp.GetTaskDefinitionStore()
+	taskUsecase := jobApp.GetTaskStore()
 	taskExecutionUsecase := jobApp.GetTaskExecutionStore()
 
 	worker := genericjob_integration.NewWorker(topic, taskUsecase, taskExecutionUsecase)

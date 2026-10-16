@@ -1,7 +1,8 @@
 {
 	"namespace": "deployd",
 	"queue_id": "sendInvoice()",
-	"queue_param": {
+
+	"input": {
 		"email": "keenan@example.com"
 	},
 

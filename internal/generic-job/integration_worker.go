@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"math/rand"
 	"sync"
 	"time"
 
@@ -42,138 +43,120 @@ func NewWorker(
 }
 
 func (w *worker) Run(ctx context.Context, client *genericjob.Client) error {
-	subscriber, err := w.topic.Subscribe(ctx, notifier_impl.NewStandardSubscriber(nil))
-	if err != nil {
-		return err
-	}
-
-	subscriber.Start()
-
-	// simple workers
-	sendInvoiceQueue := make(chan *entity.TaskExecution)
-	go func() {
-
-		sendInvoice := func(taskExec *entity.TaskExecution) error {
-			log.Printf("The task sendInvoice(): %v is running!", taskExec.Id)
-			return nil
-		}
-
-		// simple executor/worker for sendInvoice~
-		for taskExec := range sendInvoiceQueue {
-
-			// SAMPLE LOGIC FOR DOING TASK
-			runAt := time.Now()
-			taskExec.ActualRunAt = &runAt
-			taskExec.Status = entity.ExecutionStatusInProgress
-
-			// update before
-			_, err := client.Propose(ctx, genericjob.UpdateTaskExecution(taskExec))
-			if err != nil {
-				log.Printf("ERROR failed to update task execution instance: %v\n", err)
-				return
-			}
-
-			// FINALLY, ACTUAL FUNCTION TO EXECUTE
-			err = sendInvoice(taskExec)
-
-			if err != nil {
-				taskExec.Status = entity.ExecutionStatusFailed
-			} else {
-				taskExec.Status = entity.ExecutionStatusDone
-			}
-
-			tComplete := time.Now()
-			taskExec.CompletedAt = &tComplete
-
-			// update after
-			_, err = client.Propose(ctx, genericjob.UpdateTaskExecution(taskExec))
-			if err != nil {
-				// failed to inform cluster back. Leader's timeout mechanism will kick in.
-				log.Printf("ERROR failed to update task execution instance: %v\n", err)
-				return
-			}
-
-		}
-	}()
-
 	queue := make(map[string]chan *entity.TaskExecution)
-	queue["sendInvoice()"] = sendInvoiceQueue
-
-	ticker := time.NewTicker(1 * time.Second)
-	workerID := uuid.NewString()
+	queue["sendInvoice()"] = newPooledQueue(ctx, client, 30, sendInvoice)
 
 	// TODO: have "workerState" per queue; (eg how much they can take more work, or should stop RequestWork etc..)
 
-	go func() {
-		for {
-			select {
-			case <-ticker.C:
-				// request a tasks to leader if worker/executor ready for a particular queue;
-				// advertising how much resource we have, geolocation, etc~
-				// a "lock" for the next 1 hour etc..
-				// in ourcase, the worker is ready for sendInvoice()
-				// can use the "workerState"
-				_, err := client.Propose(ctx, genericjob.RequestWork{
+	// each queue have their "request work" loop;
+	// we can add back-off / backpressure logic here later~
+	// right now, we're just using simple ticker, and it will always ask for more work
+	for qname, q := range queue {
+		subscriber, err := w.topic.Subscribe(ctx, notifier_impl.NewStandardSubscriber(nil))
+		if err != nil {
+			return err
+		}
+
+		subscriber.Start()
+
+		requestWorkTicker := time.NewTicker(2 * time.Second)
+		workerID := uuid.NewString()
+
+		// Pings
+		go func() {
+			for {
+				if ctx.Err() != nil {
+					return
+				}
+
+				time.Sleep(time.Duration(rand.Intn(900)+500) * time.Millisecond)
+
+				t := time.Now()
+				_, err := client.Propose(ctx, genericjob.Ping{
 					Namespace: "deployd", // namespace of the queue, should be the same as the queue used in the tasks
 					WorkerID:  workerID,
-					QueueID:   "sendInvoice()", // todo: the value dynamic depending on worker's capacity
-					Count:     1000,
+					QueueID:   qname, // todo: the value dynamic depending on worker's capacity
+					Timestamp: t,
 				})
+
 				if err != nil {
-					log.Printf("Error requesting work: %v", err)
+					log.Printf("Error ping: %v", err)
 					continue
 				}
+			}
+		}()
 
-			case msg := <-subscriber.Listen():
-				// t := time.Now()
-
-				switch evt := msg.(type) {
-				case genericjob.EventWorkAssigned:
-					if evt.WorkerID != workerID {
-						// not our work!
+		go func() {
+			for {
+				t := time.Now()
+				select {
+				case <-requestWorkTicker.C:
+					// request a tasks to leader if worker/executor ready for a particular queue;
+					// advertising how much resource we have, geolocation, etc~
+					// a "lock" for the next 1 hour etc..
+					// in ourcase, the worker is ready for sendInvoice()
+					// can use the "workerState"
+					_, err := client.Propose(ctx, genericjob.RequestWork{
+						Namespace: "deployd", // namespace of the queue, should be the same as the queue used in the tasks
+						WorkerID:  workerID,
+						QueueID:   qname, // todo: the value dynamic depending on worker's capacity
+						Count:     1000,
+						Timestamp: t,
+					})
+					if err != nil {
+						log.Printf("Error requesting work: %v", err)
 						continue
 					}
 
-					// TODO: every worker client should persist the work inside their own local storage / DB
-					// to keep track.
-					// TODO: Client programming language, maybe interact via network/websocket.
-					// for now we keep it simple, we just use the in process golang worker.
-					// TODO: worker type, registered to server (for work assignment logic/strategy)
+				case msg := <-subscriber.Listen():
+					// t := time.Now()
 
-					q, ok := queue[evt.QueueID]
-					if !ok {
-						// i don't want / not supposed to do this kind of work
-						// i'm not advertisindg this?? but how do i get?
-						continue
-					}
-
-					// group by time
-					tgs := make(map[time.Time][]*entity.TaskExecution)
-
-					for _, taskExec := range evt.TaskExecs {
-						if _, ok := tgs[taskExec.ScheduledRunAt]; !ok {
-							tgs[taskExec.ScheduledRunAt] = make([]*entity.TaskExecution, 0)
+					switch evt := msg.(type) {
+					case genericjob.EventWorkAssigned:
+						if evt.WorkerID != workerID {
+							// not our work!
+							continue
 						}
-						tgs[taskExec.ScheduledRunAt] = append(tgs[taskExec.ScheduledRunAt], taskExec)
-					}
 
-					for tg := range tgs {
-						tasks := tgs[tg]
-						tm := time.AfterFunc(time.Until(tg), func() {
-							for _, scheduledTask := range tasks {
-								q <- scheduledTask
+						// TODO: every worker client should persist the work inside their own local storage / DB
+						// to keep track.
+						// TODO: Client programming language, maybe interact via network/websocket.
+						// for now we keep it simple, we just use the in process golang worker.
+						// TODO: worker type, registered to server (for work assignment logic/strategy)
+
+						// group by time
+						tgs := make(map[time.Time][]*entity.TaskExecution)
+
+						for _, taskExec := range evt.TaskExecs {
+							if _, ok := tgs[taskExec.ScheduledRunAt]; !ok {
+								tgs[taskExec.ScheduledRunAt] = make([]*entity.TaskExecution, 0)
 							}
-						})
-						// TODO: handle this for cancellation (in the future hehe)
-						_ = tm
-					}
+							tgs[taskExec.ScheduledRunAt] = append(tgs[taskExec.ScheduledRunAt], taskExec)
+						}
 
-				case genericjob.EventTaskExecutionCreated:
-					//
+						for tg := range tgs {
+							tasks := tgs[tg]
+
+							// we can execute all old task..
+							// or handles it according to different strategy..
+							// or simply marked it as ExecutionStatusMissed
+
+							tm := time.AfterFunc(time.Until(tg), func() {
+								for _, scheduledTask := range tasks {
+									q <- scheduledTask
+								}
+							})
+							// TODO: handle this for cancellation (in the future hehe)
+							_ = tm
+						}
+
+					case genericjob.EventTaskExecutionCreated:
+						//
+					}
 				}
 			}
-		}
-	}()
+		}()
+	}
 
 	return nil
 }
@@ -228,6 +211,11 @@ func (w *worker) OnBecomingRaftLeader(ctx context.Context, term uint64, leaderID
 				case genericjob.EventTaskCreated, genericjob.EventTaskNeedRegenerate:
 					log.Printf("A new task definition has come. I better schedule! %+v", evt)
 					task := getTask(evt)
+					if task == nil {
+						// TODO: error inside the raft app, can check which causes empty event
+						continue
+					}
+
 					if task.ExecutionStrategy != entity.ExecutionStrategyScheduled {
 						log.Printf("[warn] unsupported execution strategy: %v", task.ExecutionStrategy)
 						continue
@@ -339,6 +327,8 @@ func (ls *leaderState) generateScheduledTaskExecutionInstances(ctx context.Conte
 			ScheduledRunAt: next,
 			Status:         status,
 			PublishedAt:    serverTime,
+			Input:          task.Input,
+			UserTime:       task.UserTime,
 		}
 
 		_, err := ls.client.Propose(ctx, genericjob.CreateTaskExecution(state))

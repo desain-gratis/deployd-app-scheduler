@@ -17,8 +17,9 @@ type Task struct {
 
 	// task queue/channel name, eg. sendInvoice()
 	// is the task queue that worker can pickup
-	QueueID    string `json:"queue_id"`
-	QueueParam any    `json:"queue_param,omitempty"`
+	QueueID string `json:"queue_id"`
+
+	Input any `json:"input,omitempty"`
 
 	// to get user timezone
 	UserTime time.Time `json:"user_time"` // for timezone

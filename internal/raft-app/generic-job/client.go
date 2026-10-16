@@ -37,6 +37,8 @@ func (c *Client) Propose(ctx context.Context, request any) (any, error) {
 		command = Command_Worker_UpdateTaskExecution
 	case RequestWork:
 		command = Command_Worker_RequestWork
+	case Ping:
+		command = Command_Worker_Ping
 	default:
 		return nil, fmt.Errorf("unsupported type %T", req)
 	}

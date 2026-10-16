@@ -31,6 +31,7 @@ const (
 	Command_Leader_CreateTaskExecution Command = "leader.task-execution.create"
 	Command_Worker_UpdateTaskExecution Command = "worker.task-execution.update"
 	Command_Worker_RequestWork         Command = "worker.request-work"
+	Command_Worker_Ping                Command = "worker.ping"
 	// When leader started, it will submit this command
 	Command_Leader_UpdateLastSchedulingTime Command = "leader.update-last-scheduling-time"
 
@@ -51,6 +52,13 @@ type RaftApp struct {
 	// temporary var just for testing
 	// since this is in memory, will resets after restart
 	scheduledTaskCount int
+
+	// queue -> workers
+	workers map[string]map[string]*worker
+}
+type worker struct {
+	// region capacity etc...
+	LastPing time.Time
 }
 
 type CommandWrapper struct {
@@ -91,6 +99,8 @@ func New(topic notifier.Topic, dbJob *badger.DB) *RaftApp {
 		topic:                 topic,
 		taskDefinitionUsecase: taskDefinitionUsecase,
 		taskExecutionUsecase:  taskExecutionUsecase,
+
+		workers: make(map[string]map[string]*worker),
 	}
 }
 
@@ -212,22 +222,53 @@ func (m *RaftApp) OnUpdateV2(ctx context.Context, entry raft.EntryV2) (any, erro
 			return nil, err
 		}
 
-		// todo: in storage layer directly~
+		// ping
+		// make active automatically (should be the same as ping)
+		if _, ok := m.workers[rw.QueueID]; !ok {
+			m.workers[rw.QueueID] = map[string]*worker{
+				rw.WorkerID: {LastPing: rw.Timestamp},
+			}
+		}
+		if _, ok := m.workers[rw.QueueID][rw.QueueID]; !ok {
+			m.workers[rw.QueueID][rw.QueueID] = &worker{}
+		}
+
+		m.workers[rw.QueueID][rw.QueueID].LastPing = rw.Timestamp
+
+		// pping - end
+
+		// todo: in storage layer directly by query (if possible)~
 		filtered := make([]*entity.TaskExecution, 0, len(taskExecs))
 		for _, pendingTaskExec := range taskExecs {
 			if pendingTaskExec.Status != entity.ExecutionStatusPending {
 				continue
 			}
 
-			if pendingTaskExec.State != nil && pendingTaskExec.State.AssignedWorker != "" {
+			if pendingTaskExec.State != nil {
 				// already have worker there
-				continue
+
+				if pendingTaskExec.State.AssignedWorker == rw.WorkerID {
+					// it's us :) no need to do anything, and just wait for execution
+					continue
+				}
+
+				// continue
+
+				// check if that worker is active!
+				// and last ping is recent
+				if workerState, ok := m.workers[rw.QueueID][pendingTaskExec.State.AssignedWorker]; ok {
+					if rw.Timestamp.Sub(workerState.LastPing) <= 5*time.Second {
+						// the other worker seemed healthy!
+						continue
+					}
+				}
 			}
 
 			// filter only in the next 1 hour maybe~~~
 
 			pendingTaskExec.State = &entity.TaskExecutionState{
 				AssignedWorker: rw.WorkerID,
+				ManagingNodeID: entry.SourceNodeID,
 			}
 
 			filtered = append(filtered, pendingTaskExec)
@@ -240,13 +281,30 @@ func (m *RaftApp) OnUpdateV2(ctx context.Context, entry raft.EntryV2) (any, erro
 		}
 
 		// since we want async later (based on various strategy, we use topic, not direct reply)
+
 		m.topic.Broadcast(ctx, EventWorkAssigned{
 			WorkerID:  rw.WorkerID,
 			QueueID:   rw.QueueID,
 			TaskExecs: filtered,
 		})
 
-		return "SUCCESS BRUH", nil
+		return "SUCCESS BRUV", nil
+	case Command_Worker_Ping:
+		rw, err := parseAs[Ping](cmd.Value)
+		if err != nil {
+			return nil, err
+		}
+		// todo: maybe use namespacing.. but yeah can be for later
+
+		if _, ok := m.workers[rw.QueueID]; !ok {
+			m.workers[rw.QueueID] = make(map[string]*worker)
+		}
+		if _, ok := m.workers[rw.QueueID][rw.WorkerID]; !ok {
+			m.workers[rw.QueueID][rw.WorkerID] = &worker{}
+		}
+
+		m.workers[rw.QueueID][rw.WorkerID].LastPing = rw.Timestamp
+		return "", nil
 	case Command_Worker_ExecuteTask:
 		// 1. each worker race to take the lease; one winning or any other algorithm, it can start to run the task
 	case Command_Worker_UpdateTask:
@@ -292,7 +350,19 @@ type RequestWork struct {
 	Count    uint64 // arbitrary unit
 
 	// location, preferences, etc...
+	Timestamp time.Time
 }
+
+type Ping struct {
+	// queue name & capacity
+	Namespace string
+
+	WorkerID string
+	QueueID  string
+
+	Timestamp time.Time
+}
+
 type TimeRange struct {
 	Start time.Time `json:"start"`
 	End   time.Time `json:"end"`

@@ -20,7 +20,11 @@ type TaskExecution struct {
 	ScheduledRunAt time.Time       `json:"scheduled_run_at"`
 	ActualRunAt    *time.Time      `json:"actual_run_at"`
 	CompletedAt    *time.Time      `json:"completed_at"`
+	UserTime       time.Time       `json:"user_time"`
 	Status         ExecutionStatus `json:"status"`
+
+	Input  any `json:"input,omitempty"`
+	Output any `json:"output,omitempty"`
 
 	State *TaskExecutionState `json:"state"`
 
@@ -30,6 +34,7 @@ type TaskExecution struct {
 
 type TaskExecutionState struct {
 	AssignedWorker string `json:"assigned_worker"`
+	ManagingNodeID uint64 `json:"managing_node_id"` // which node the worker communicates with
 }
 
 type ExecutionStatus string

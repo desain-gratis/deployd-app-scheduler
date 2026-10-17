@@ -44,7 +44,8 @@ var _ raft.ApplicationV2 = (*RaftApp)(nil)
 var _ raft.ApplicationV2WithSnapshot = (*RaftApp)(nil)
 
 type RaftApp struct {
-	topic notifier.Topic
+	namespace string
+	topic     notifier.Topic
 
 	taskDefinitionUsecase *mycontent_base.Handler[*entity.Task]
 	taskExecutionUsecase  *mycontent_base.Handler[*entity.TaskExecution]
@@ -53,12 +54,18 @@ type RaftApp struct {
 	// since this is in memory, will resets after restart
 	scheduledTaskCount int
 
-	// queue -> workers
-	workers map[string]map[string]*worker
+	node                  map[uint64]*node
+	healthyDurationWithin time.Duration
 }
-type worker struct {
-	// region capacity etc...
+
+type node struct {
+	// last ping of this node
 	LastPing time.Time
+	QueueIDs map[string]*QueueState
+}
+
+type QueueState struct {
+	TaskAssigned uint64
 }
 
 type CommandWrapper struct {
@@ -75,9 +82,10 @@ type EventTaskNeedRegenerate *entity.Task
 type EventTaskExecutionCreated *entity.TaskExecution
 
 type EventWorkAssigned struct {
-	WorkerID  string // the worker that should do the work
-	QueueID   string // each work only for one queue
-	TaskExecs []*entity.TaskExecution
+	AssignedNodeID        uint64
+	TaskExecs             []*entity.TaskExecution
+	ExecToleranceDuration time.Duration
+	CountRebalance        int
 }
 
 type EventWorkCreatedScheduledTask struct {
@@ -88,7 +96,7 @@ type EventWorkCreatedScheduledTask struct {
 
 var ErrRetryable = errors.New("retryable")
 
-func New(topic notifier.Topic, dbJob *badger.DB) *RaftApp {
+func New(namespace string, topic notifier.Topic, dbJob *badger.DB) *RaftApp {
 	taskDefinitionStorage := content_badger.New(dbJob, TableTask, 0)
 	taskExecutionStorage := content_badger.NewAutoIncrement(dbJob, TableTaskExecution, 1) // refer to task definition
 
@@ -96,11 +104,12 @@ func New(topic notifier.Topic, dbJob *badger.DB) *RaftApp {
 	taskExecutionUsecase := mycontent_base.New[*entity.TaskExecution](taskExecutionStorage)
 
 	return &RaftApp{
+		namespace:             namespace,
 		topic:                 topic,
 		taskDefinitionUsecase: taskDefinitionUsecase,
 		taskExecutionUsecase:  taskExecutionUsecase,
-
-		workers: make(map[string]map[string]*worker),
+		node:                  make(map[uint64]*node),
+		healthyDurationWithin: 15 * time.Second,
 	}
 }
 
@@ -167,6 +176,12 @@ func (m *RaftApp) OnUpdateV2(ctx context.Context, entry raft.EntryV2) (any, erro
 
 		// TODO: change detection / delta
 
+		// simple check terminal status
+		switch t.Status {
+		case entity.ExecutionStatusDone, entity.ExecutionStatusFailed:
+			m.getNodeQueueState(entry.SourceNodeID, t.QueueID).TaskAssigned--
+		}
+
 		result, err := m.taskExecutionUsecase.Post(ctx, t, nil)
 		if err != nil {
 			return nil, err
@@ -190,7 +205,7 @@ func (m *RaftApp) OnUpdateV2(ctx context.Context, entry raft.EntryV2) (any, erro
 			return nil, err
 		}
 
-		ch, err := m.taskDefinitionUsecase.Stream(ctx, data.Namespace, data.RefIDs, data.ID)
+		ch, err := m.taskDefinitionUsecase.Stream(ctx, m.namespace, data.RefIDs, data.ID)
 		if err != nil {
 			return nil, err
 		}
@@ -201,6 +216,9 @@ func (m *RaftApp) OnUpdateV2(ctx context.Context, entry raft.EntryV2) (any, erro
 
 		return "SUCCESS", nil
 	case Command_Worker_RequestWork:
+		// Right now we implement Request -> Give work strategy (first come first serve), later can extend / decouple with many logic..
+		// Before submitting it via. raft, we can filter it from worker so no need to send many RequestWork msg
+
 		rw, err := parseAs[RequestWork](cmd.Value)
 		if err != nil {
 			return nil, err
@@ -217,93 +235,106 @@ func (m *RaftApp) OnUpdateV2(ctx context.Context, entry raft.EntryV2) (any, erro
 		// we should use different storage (not my-content), better used for queue for this
 		// to be able to easily filter PENDING task, etc.
 		// or filter TIMEOUT tasks from worker, and release it from that worker and assigned to this new worker etc..
-		taskExecs, err := m.taskExecutionUsecase.Get(ctx, rw.Namespace, []string{rw.QueueID}, "")
-		if err != nil {
-			return nil, err
-		}
 
-		// ping
-		// make active automatically (should be the same as ping)
-		if _, ok := m.workers[rw.QueueID]; !ok {
-			m.workers[rw.QueueID] = map[string]*worker{
-				rw.WorkerID: {LastPing: rw.Timestamp},
+		filtered := make([]*entity.TaskExecution, 0)
+
+		var countRebalance int
+
+		// check node health
+		healthy := make(map[uint64]struct{})
+
+		// by default, the work requester is healthy
+		m.getNode(entry.SourceNodeID).LastPing = rw.Timestamp
+
+		for nodeID, node := range m.node {
+			if rw.Timestamp.Sub(node.LastPing) <= m.healthyDurationWithin {
+				healthy[nodeID] = struct{}{}
+			} else {
+				// log.Printf("I'm detecting that this node: %v is not healthy", nodeID)
 			}
 		}
-		if _, ok := m.workers[rw.QueueID][rw.QueueID]; !ok {
-			m.workers[rw.QueueID][rw.QueueID] = &worker{}
-		}
 
-		m.workers[rw.QueueID][rw.QueueID].LastPing = rw.Timestamp
+		// We can have various algorithm here to distribute the tasks into the "healthy" node's queue for later..
+		// Right now, we just assign it all to the requesting node.
 
-		// pping - end
-
-		// todo: in storage layer directly by query (if possible)~
-		filtered := make([]*entity.TaskExecution, 0, len(taskExecs))
-		for _, pendingTaskExec := range taskExecs {
-			if pendingTaskExec.Status != entity.ExecutionStatusPending {
-				continue
+		for _, queue := range rw.QueueIDs {
+			taskExecs, err := m.taskExecutionUsecase.Get(ctx, m.namespace, []string{queue}, "")
+			if err != nil {
+				return nil, err
 			}
 
-			if pendingTaskExec.State != nil {
-				// already have worker there
+			// ping - end
 
-				if pendingTaskExec.State.AssignedWorker == rw.WorkerID {
-					// it's us :) no need to do anything, and just wait for execution
+			// todo: in storage layer directly by query (if possible)~
+			for _, pendingTaskExec := range taskExecs {
+				if pendingTaskExec.Status != entity.ExecutionStatusPending {
 					continue
 				}
 
-				// continue
+				if pendingTaskExec.State != nil {
+					// already have worker there
 
-				// check if that worker is active!
-				// and last ping is recent
-				if workerState, ok := m.workers[rw.QueueID][pendingTaskExec.State.AssignedWorker]; ok {
-					if rw.Timestamp.Sub(workerState.LastPing) <= 5*time.Second {
-						// the other worker seemed healthy!
+					if pendingTaskExec.State.AssignedNodeID == entry.SourceNodeID {
+						// it's us :) no need to do anything, and just wait for execution
+						// since we're sending request work, we're available
 						continue
 					}
+
+					// continue
+
+					// check if that worker is active!
+					// and last ping is recent
+					if _, ok := healthy[pendingTaskExec.State.AssignedNodeID]; ok {
+						continue
+					}
+
+					countRebalance++
 				}
-			}
 
-			// filter only in the next 1 hour maybe~~~
+				// filter only in the next 1 hour maybe~~~
 
-			pendingTaskExec.State = &entity.TaskExecutionState{
-				AssignedWorker: rw.WorkerID,
-				ManagingNodeID: entry.SourceNodeID,
-			}
+				pendingTaskExec.State = &entity.TaskExecutionState{
+					AssignedNodeID: entry.SourceNodeID,
+				}
 
-			filtered = append(filtered, pendingTaskExec)
+				// todo: in storage layer directly~
+				pte, err := m.taskExecutionUsecase.Post(ctx, pendingTaskExec, nil)
+				if err != nil {
+					return nil, err
+				}
 
-			// todo: in storage layer directly~
-			_, err := m.taskExecutionUsecase.Post(ctx, pendingTaskExec, nil)
-			if err != nil {
-				return nil, err
+				filtered = append(filtered, pte)
+
+				m.getNodeQueueState(entry.SourceNodeID, queue).TaskAssigned++
 			}
 		}
 
 		// since we want async later (based on various strategy, we use topic, not direct reply)
 
-		m.topic.Broadcast(ctx, EventWorkAssigned{
-			WorkerID:  rw.WorkerID,
-			QueueID:   rw.QueueID,
-			TaskExecs: filtered,
-		})
+		m.topic.Broadcast(
+			ctx,
+			EventWorkAssigned{
+				AssignedNodeID:        entry.SourceNodeID,
+				TaskExecs:             filtered,
+				ExecToleranceDuration: m.healthyDurationWithin,
+				CountRebalance:        countRebalance,
+			},
+		)
 
 		return "SUCCESS BRUV", nil
 	case Command_Worker_Ping:
+		// update node ping
+
+		// TODO: consider to move it outside of the raft?
+
 		rw, err := parseAs[Ping](cmd.Value)
 		if err != nil {
 			return nil, err
 		}
 		// todo: maybe use namespacing.. but yeah can be for later
 
-		if _, ok := m.workers[rw.QueueID]; !ok {
-			m.workers[rw.QueueID] = make(map[string]*worker)
-		}
-		if _, ok := m.workers[rw.QueueID][rw.WorkerID]; !ok {
-			m.workers[rw.QueueID][rw.WorkerID] = &worker{}
-		}
+		m.getNode(entry.SourceNodeID).LastPing = rw.Timestamp
 
-		m.workers[rw.QueueID][rw.WorkerID].LastPing = rw.Timestamp
 		return "", nil
 	case Command_Worker_ExecuteTask:
 		// 1. each worker race to take the lease; one winning or any other algorithm, it can start to run the task
@@ -317,6 +348,29 @@ func (m *RaftApp) OnUpdateV2(ctx context.Context, entry raft.EntryV2) (any, erro
 	return nil, fmt.Errorf("%w command: %s", errors.ErrUnsupported, cmd.Name)
 }
 
+func (m *RaftApp) getNode(nodeID uint64) *node {
+	_, ok := m.node[nodeID]
+	if !ok {
+		m.node[nodeID] = &node{QueueIDs: make(map[string]*QueueState)}
+	}
+
+	return m.node[nodeID]
+}
+
+func (m *RaftApp) getNodeQueueState(nodeID uint64, queueID string) *QueueState {
+	_, ok := m.node[nodeID]
+	if !ok {
+		m.node[nodeID] = &node{QueueIDs: make(map[string]*QueueState)}
+	}
+
+	_, ok = m.node[nodeID].QueueIDs[queueID]
+	if !ok {
+		m.node[nodeID].QueueIDs[queueID] = &QueueState{}
+	}
+
+	return m.node[nodeID].QueueIDs[queueID]
+}
+
 type CreateTask struct {
 	Task       entity.Task `json:"task_definition"`
 	ServerTime time.Time   `json:"server_time"`
@@ -325,9 +379,8 @@ type CreateTask struct {
 type UpdateTask CreateTask
 
 type RequestRegenerateTaskInstances struct {
-	Namespace string
-	RefIDs    []string
-	ID        string
+	RefIDs []string
+	ID     string
 }
 
 type InitiateTaskExecution struct {
@@ -341,26 +394,16 @@ type InitiateTaskExecution struct {
 // TaskExecution Instance
 type CreateTaskExecution *entity.TaskExecution
 type UpdateTaskExecution *entity.TaskExecution
+
 type RequestWork struct {
-	// queue name & capacity
-	Namespace string
-
-	WorkerID string
-	QueueID  string
-	Count    uint64 // arbitrary unit
-
-	// location, preferences, etc...
-	Timestamp time.Time
+	Ping
+	QueueIDs []string
+	Count    []uint64 // arbitrary unit
 }
 
 type Ping struct {
-	// queue name & capacity
-	Namespace string
-
-	WorkerID string
-	QueueID  string
-
 	Timestamp time.Time
+	// other status
 }
 
 type TimeRange struct {

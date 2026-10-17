@@ -18,6 +18,10 @@ func NewClient(raftClient *runneretcd.RaftContext) *Client {
 	}
 }
 
+func (c *Client) ID() uint64 {
+	return c.raftClient.ID()
+}
+
 // Propose convenient function
 func (c *Client) Propose(ctx context.Context, request any) (any, error) {
 	var command Command

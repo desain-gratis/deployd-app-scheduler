@@ -59,7 +59,8 @@ func enableSchedulerModule(ctx context.Context, router *httprouter.Router) {
 
 	topic := notifier_impl.NewStandardTopic()
 
-	jobApp := genericjob.New(topic, db)
+	namespace := "deployd"
+	jobApp := genericjob.New(namespace, topic, db)
 
 	jobAppRaft, _, err := runneretcd.RunWithConfig(ctx, os.Getenv("DEPLOYD_RAFT"), "scheduler", jobApp)
 	if err != nil {

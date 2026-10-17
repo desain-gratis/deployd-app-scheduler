@@ -51,114 +51,126 @@ func (w *worker) Run(ctx context.Context, client *genericjob.Client) error {
 	// each queue have their "request work" loop;
 	// we can add back-off / backpressure logic here later~
 	// right now, we're just using simple ticker, and it will always ask for more work
-	for qname, q := range queue {
-		subscriber, err := w.topic.Subscribe(ctx, notifier_impl.NewStandardSubscriber(nil))
-		if err != nil {
-			return err
+	subscriber, err := w.topic.Subscribe(ctx, notifier_impl.NewStandardSubscriber(nil))
+	if err != nil {
+		return err
+	}
+
+	subscriber.Start()
+
+	// Pings
+	go func() {
+		for {
+			if ctx.Err() != nil {
+				return
+			}
+
+			time.Sleep(time.Duration(rand.Intn(900)+500) * time.Millisecond)
+
+			t := time.Now()
+			_, err := client.Propose(ctx, genericjob.Ping{Timestamp: t})
+			if err != nil {
+				log.Printf("Error ping: %v", err)
+				continue
+			}
 		}
+	}()
 
-		subscriber.Start()
+	requestWorkTicker := time.NewTicker(2 * time.Second)
 
-		requestWorkTicker := time.NewTicker(2 * time.Second)
-		workerID := uuid.NewString()
-
-		// Pings
-		go func() {
-			for {
-				if ctx.Err() != nil {
-					return
-				}
-
-				time.Sleep(time.Duration(rand.Intn(900)+500) * time.Millisecond)
-
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				// bye2
+				return
+			case <-requestWorkTicker.C:
 				t := time.Now()
-				_, err := client.Propose(ctx, genericjob.Ping{
-					Namespace: "deployd", // namespace of the queue, should be the same as the queue used in the tasks
-					WorkerID:  workerID,
-					QueueID:   qname, // todo: the value dynamic depending on worker's capacity
-					Timestamp: t,
-				})
 
+				// request a tasks to leader if worker/executor ready for a particular queue;
+				// advertising how much resource we have, geolocation, etc~
+				// a "lock" for the next 1 hour etc..
+				// in ourcase, the worker is ready for sendInvoice()
+				// can use the "workerState"
+				_, err := client.Propose(ctx, genericjob.RequestWork{
+					QueueIDs: []string{"sendInvoice()"}, // todo: now hardcoded, latter we get all from list of executors queue
+					Count:    []uint64{100},
+					Ping:     genericjob.Ping{Timestamp: t},
+				})
 				if err != nil {
-					log.Printf("Error ping: %v", err)
+					log.Printf("Error requesting work: %v", err)
 					continue
 				}
-			}
-		}()
 
-		go func() {
-			for {
-				t := time.Now()
-				select {
-				case <-requestWorkTicker.C:
-					// request a tasks to leader if worker/executor ready for a particular queue;
-					// advertising how much resource we have, geolocation, etc~
-					// a "lock" for the next 1 hour etc..
-					// in ourcase, the worker is ready for sendInvoice()
-					// can use the "workerState"
-					_, err := client.Propose(ctx, genericjob.RequestWork{
-						Namespace: "deployd", // namespace of the queue, should be the same as the queue used in the tasks
-						WorkerID:  workerID,
-						QueueID:   qname, // todo: the value dynamic depending on worker's capacity
-						Count:     1000,
-						Timestamp: t,
-					})
-					if err != nil {
-						log.Printf("Error requesting work: %v", err)
+			case msg := <-subscriber.Listen():
+				switch evt := msg.(type) {
+				case genericjob.EventWorkAssigned:
+					if evt.AssignedNodeID != client.ID() {
+						// it's not our work!
 						continue
 					}
 
-				case msg := <-subscriber.Listen():
-					// t := time.Now()
+					// TODO: every worker client should persist the work inside their own local storage / DB
+					// to keep track.
+					// TODO: Client programming language, maybe interact via network/websocket.
+					// for now we keep it simple, we just use the in process golang worker.
+					// TODO: worker type, registered to server (for work assignment logic/strategy)
 
-					switch evt := msg.(type) {
-					case genericjob.EventWorkAssigned:
-						if evt.WorkerID != workerID {
-							// not our work!
+					// group by time
+					tgs := make(map[timeQueue][]*entity.TaskExecution)
+
+					for _, taskExec := range evt.TaskExecs {
+						tq := timeQueue{taskExec.ScheduledRunAt, taskExec.QueueID}
+						if _, ok := tgs[tq]; !ok {
+							tgs[tq] = make([]*entity.TaskExecution, 0)
+						}
+						tgs[tq] = append(tgs[tq], taskExec)
+					}
+
+					for tg := range tgs {
+						q, ok := queue[tg.queueID]
+						if !ok {
+							// queue not found
 							continue
 						}
 
-						// TODO: every worker client should persist the work inside their own local storage / DB
-						// to keep track.
-						// TODO: Client programming language, maybe interact via network/websocket.
-						// for now we keep it simple, we just use the in process golang worker.
-						// TODO: worker type, registered to server (for work assignment logic/strategy)
+						tasks := tgs[tg]
 
-						// group by time
-						tgs := make(map[time.Time][]*entity.TaskExecution)
+						// we can execute all old task..
+						// or handles it according to different strategy..
+						// or simply marked it as ExecutionStatusMissed
 
-						for _, taskExec := range evt.TaskExecs {
-							if _, ok := tgs[taskExec.ScheduledRunAt]; !ok {
-								tgs[taskExec.ScheduledRunAt] = make([]*entity.TaskExecution, 0)
+						executeAt := time.Until(tg.taskScheduledRunAt)
+
+						tm := time.AfterFunc(executeAt, func() {
+							for _, scheduledTask := range tasks {
+								q <- scheduledTask
 							}
-							tgs[taskExec.ScheduledRunAt] = append(tgs[taskExec.ScheduledRunAt], taskExec)
+						})
+
+						if executeAt <= 0 && executeAt >= -evt.ExecToleranceDuration {
+							for _, scheduledTask := range tasks {
+								q <- scheduledTask
+							}
 						}
 
-						for tg := range tgs {
-							tasks := tgs[tg]
-
-							// we can execute all old task..
-							// or handles it according to different strategy..
-							// or simply marked it as ExecutionStatusMissed
-
-							tm := time.AfterFunc(time.Until(tg), func() {
-								for _, scheduledTask := range tasks {
-									q <- scheduledTask
-								}
-							})
-							// TODO: handle this for cancellation (in the future hehe)
-							_ = tm
-						}
-
-					case genericjob.EventTaskExecutionCreated:
-						//
+						// TODO: handle this for cancellation (in the future hehe)
+						_ = tm
 					}
+
+				case genericjob.EventTaskExecutionCreated:
+					//
 				}
 			}
-		}()
-	}
+		}
+	}()
 
 	return nil
+}
+
+type timeQueue struct {
+	taskScheduledRunAt time.Time
+	queueID            string
 }
 
 // Called everytime becoming raft leader
@@ -193,7 +205,7 @@ func (w *worker) OnBecomingRaftLeader(ctx context.Context, term uint64, leaderID
 
 	// request the leader (us) to send ALL task as genericjob.EventTaskNeedRegenerate event in raft
 	// to make it more consistent
-	_, err = ls.client.Propose(ctx, genericjob.RequestRegenerateTaskInstances{Namespace: "*", RefIDs: nil, ID: ""})
+	_, err = ls.client.Propose(ctx, genericjob.RequestRegenerateTaskInstances{RefIDs: nil, ID: ""})
 	if err != nil {
 		return nil
 	}
@@ -371,7 +383,7 @@ func (ls *leaderState) scheduleNextGenerate(ctx context.Context, t time.Duration
 	// Schedule for next generate trigger for this task
 	_ = time.AfterFunc(t, func() {
 		// to trigger the tick
-		_, err := ls.client.Propose(ctx, genericjob.RequestRegenerateTaskInstances{Namespace: task.Namespace(), RefIDs: task.RefIDs(), ID: task.ID()})
+		_, err := ls.client.Propose(ctx, genericjob.RequestRegenerateTaskInstances{RefIDs: task.RefIDs(), ID: task.ID()})
 		if err != nil {
 			log.Printf("Error scheduling next generate time")
 			return

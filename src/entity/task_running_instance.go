@@ -33,8 +33,7 @@ type TaskExecution struct {
 }
 
 type TaskExecutionState struct {
-	AssignedWorker string `json:"assigned_worker"`
-	ManagingNodeID uint64 `json:"managing_node_id"` // which node the worker communicates with
+	AssignedNodeID uint64 `json:"assigned_node_id"` // which node the worker communicates with
 }
 
 type ExecutionStatus string

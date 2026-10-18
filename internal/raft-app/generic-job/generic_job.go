@@ -11,6 +11,7 @@ import (
 	mycontent_base "github.com/desain-gratis/common/delivery/mycontent-api/mycontent/base"
 	content_badger "github.com/desain-gratis/common/delivery/mycontent-api/storage/content/badger"
 	"github.com/desain-gratis/common/lib/notifier"
+	notifier_impl "github.com/desain-gratis/common/lib/notifier/impl"
 	"github.com/desain-gratis/common/lib/raft"
 	"github.com/desain-gratis/deployd-app-scheduler/src/entity"
 	"github.com/dgraph-io/badger/v4"
@@ -23,17 +24,18 @@ const (
 	TableTask          = "task_definition"
 	TableTaskExecution = "task_execution"
 
+	Command_Subscribe Command = "subscribe" // subscribe after TODO: move it to dedicated raft app
+
 	Command_User_CreateTask                       Command = "user.schedule-task" // TODO: create task
 	Command_Leader_InitiateTask                   Command = "leader.initiate-task-execution"
 	Command_Leader_UpdateTask                     Command = "leader.update-task"
 	Command_Leader_RequestRegenerateTaskExecution Command = "leader.request-regenerate-task-execution"
 	Command_Leader_CreateTaskExecution            Command = "leader.task-execution.create"
-	Command_Leader_AssignTaskExecution            Command = "leader.task-execution.assign"
+	Command_Leader_NotifyTaskUpdated              Command = "leader.task-execution.assign"
 
-	Command_Worker_UpdateTaskExecution  Command = "worker.task-execution.update"
-	Command_Worker_RequestWork          Command = "worker.request-work"
-	Command_Worker_RequestWorkImmediate Command = "worker.request-work-immediate"
-	Command_Worker_Ping                 Command = "worker.ping"
+	Command_Worker_UpdateTaskExecution         Command = "worker.task-execution.update"
+	Command_Worker_UpdateAvailability          Command = "worker.request-work"
+	Command_Worker_UpdateAvailabilityImmediate Command = "worker.request-work-immediate"
 	// When leader started, it will submit this command
 	Command_Leader_UpdateLastSchedulingTime Command = "leader.update-last-scheduling-time"
 
@@ -67,11 +69,11 @@ type ApplyResult func() (any, error)
 type EventTaskCreated *entity.Task
 type EventTaskUpdated *entity.Task
 type EventTaskNeedRegenerate *entity.Task
-type EventWorkerRequestedWork RequestWork
+type EventWorkerRequestedWork UpdateAvailability
 
 type EventTaskExecutionCreated *entity.TaskExecution
 
-type EventWorkAssigned struct{}
+type EventTaskExecutionUpdated struct{}
 
 type EventWorkCreatedScheduledTask struct {
 	ScheduledRunAt time.Time
@@ -115,6 +117,19 @@ func (m *RaftApp) OnUpdateV2(ctx context.Context, entry raft.EntryV2) (any, erro
 		return nil, err
 	}
 	switch cmd.Name {
+
+	case Command_Subscribe:
+		// TODO: move this to it's own dedicated raft-app
+		subs, err := m.topic.Subscribe(
+			context.Background(),
+			notifier_impl.NewStandardSubscriber(nil),
+		)
+		if err != nil {
+			return nil, err
+		}
+		subs.Start()
+
+		return subs, nil
 	case Command_User_CreateTask:
 		data, err := parseAs[CreateTask](cmd.Value)
 		if err != nil {
@@ -198,124 +213,26 @@ func (m *RaftApp) OnUpdateV2(ctx context.Context, entry raft.EntryV2) (any, erro
 		}
 
 		return "SUCCESS", nil
-	case Command_Worker_RequestWork:
-		rw, err := parseAs[RequestWork](cmd.Value)
+	case Command_Worker_UpdateAvailability:
+		rw, err := parseAs[UpdateAvailability](cmd.Value)
 		if err != nil {
 			return nil, err
 		}
 
-		rw.SourceNodeID = entry.SourceNodeID
+		rw.NodeID = entry.SourceNodeID
 
 		// broadcast to all worker that this node needs work
 		// leader will then process this to allocate task
 		m.topic.Broadcast(ctx, EventWorkerRequestedWork(rw))
 		return "SUCCESS", nil
-	case Command_Leader_AssignTaskExecution:
-		// Right now we implement Request -> Give work strategy (first come first serve), later can extend / decouple with many logic..
-		// Before submitting it via. raft, we can filter it from worker so no need to send many RequestWork msg
-
-		rw, err := parseAs[AssignTaskExecution](cmd.Value)
-		if err != nil {
-			return nil, err
-		}
-
-		// a worker request some wok
-		// for now, let's just give work immediately
-		// but later we can provide many strategy depending on worker state/preferences & the task itself (matching)
-		// store worker's state & availability & task splitting logic, etc..
-
-		// maybe we only filter pending; we only filter
-
-		// for now, we use "First-Come First-Serve" strategy
-		// we should use different storage (not my-content), better used for queue for this
-		// to be able to easily filter PENDING task, etc.
-		// or filter TIMEOUT tasks from worker, and release it from that worker and assigned to this new worker etc..
-
-		// GET ALL AVAILABLE QUEUE IDs from all healthy nodes
-
-		var countRebalance, countNew int
-
-		// We can have various algorithm here to distribute the tasks into the "healthy" node's queue for later..
-		// Right now, we just assign it all to the requesting node.
-
-		for _, queue := range rw.Queue {
-			taskExecs, err := m.taskExecutionUsecase.Get(ctx, m.namespace, []string{queue}, "")
-			if err != nil {
-				return nil, err
-			}
-
-			// ping - end
-
-			// todo: in storage layer directly by query (if possible)~
-			for _, pendingTaskExec := range taskExecs {
-				if pendingTaskExec.Status != entity.ExecutionStatusPending {
-					continue
-				}
-
-				if pendingTaskExec.State != nil {
-					// already have worker there
-
-					if pendingTaskExec.State.AssignedNodeID == entry.SourceNodeID {
-						// it's us :) no need to do anything, and just wait for execution
-						// since we're sending request work, we're available
-						continue
-					}
-
-					if _, ok := rw.HealthyUIDs[pendingTaskExec.State.AssignedNodeID]; ok {
-						// if it's still healthy no need rebalance
-						continue
-					}
-
-					countRebalance++
-				} else {
-					countNew++
-				}
-
-				// THEN we do the assignment / re-assignment logic.
-
-				// filter only in the next 1 hour maybe~~~
-
-				pendingTaskExec.State = &entity.TaskExecutionState{
-					// AssignedNodeID: entry.SourceNodeID,
-					AssignedNodeID: rw.ToNode, // select the first
-				}
-
-				// todo: in storage layer directly~
-				_, err := m.taskExecutionUsecase.Post(ctx, pendingTaskExec, nil)
-				if err != nil {
-					return nil, err
-				}
-			}
-		}
-
-		// since we want async later (based on various strategy, we use topic, not direct reply)
-
+	case Command_Leader_NotifyTaskUpdated:
 		// NOTIFY WORKERS, NEED TO UPDATE ALL OF THEIR IN MEMORY CRON (eg. CREATE / DELETE TIMERS, etc..), ETC
-		// if countNew > 0 || countRebalance > 0 {
-		// all worker can check the tasks in their end
 		m.topic.Broadcast(
 			ctx,
-			EventWorkAssigned{}, // or all tasks is evaluated by raft; worker can consume their already updated DB
+			EventTaskExecutionUpdated{}, // or all tasks is evaluated by raft; worker can consume their already updated DB
 		)
-		// }
 
 		return "SUCCESS BRUV", nil
-	case Command_Worker_Ping:
-		// update node ping
-
-		// TODO: consider to move it outside of the raft?
-
-		rw, err := parseAs[Ping](cmd.Value)
-		if err != nil {
-			return nil, err
-		}
-		// todo: maybe use namespacing.. but yeah can be for later
-
-		rw.SourceNodeID = entry.SourceNodeID
-
-		m.topic.Broadcast(ctx, rw)
-
-		return "", nil
 	case Command_Worker_ExecuteTask:
 		// 1. each worker race to take the lease; one winning or any other algorithm, it can start to run the task
 	case Command_Worker_UpdateTask:
@@ -352,23 +269,15 @@ type InitiateTaskExecution struct {
 type CreateTaskExecution *entity.TaskExecution
 type UpdateTaskExecution *entity.TaskExecution
 
-type RequestWork struct {
-	Ping
+type UpdateAvailability struct {
+	NodeID   uint64
 	QueueIDs []string
 	Count    []uint64 // arbitrary unit
 }
 
-// Leader assign work to worker
-// Worker should use this to notify worker
-type AssignTaskExecution struct {
-	// todo state
-
-	// HealthNode (as deemed by leader)
-	ToNode      uint64
-	HealthyUIDs map[uint64]struct{}
-	Queue       []string
-	Timestamp   time.Time
-}
+// Notifies worker that task execution tables have been updated
+// Worker should update their in-memory schedule
+type NotifyTaskUpdated struct{}
 
 type ReassignNode struct {
 	FromNode uint64
@@ -379,13 +288,6 @@ type ReassignNode struct {
 type NodeQueuePair struct {
 	Queue  *entity.QueueState
 	NodeID uint64
-}
-
-type Ping struct {
-	Timestamp    time.Time
-	SourceNodeID uint64
-	// other status
-	RandomNumber int
 }
 
 type TimeRange struct {

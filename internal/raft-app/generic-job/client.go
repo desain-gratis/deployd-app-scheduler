@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/desain-gratis/common/lib/notifier"
 	runneretcd "github.com/desain-gratis/common/lib/raft/runner-etcd"
 )
 
@@ -21,6 +22,27 @@ func NewClient(raftClient *runneretcd.RaftContext) *Client {
 
 func (c *Client) ID() uint64 {
 	return c.raftClient.ID()
+}
+
+// TODO: move to it's own dedicated raft-app client that can be composed with other raft app
+// (the same / similar to "multi")
+func (c *Client) Subscribe(ctx context.Context) (notifier.Subscription, error) {
+	cmdWrap := CommandWrapper{Name: Command_Subscribe, Value: nil}
+
+	ctx2, cancel := context.WithTimeout(ctx, 5*time.Second) // IMPORTANT to avoid stuck; TODO: ALL USE TIMEOUT FOR DG
+	defer cancel()
+
+	result, err := c.raftClient.Propose(ctx2, cmdWrap)
+	if err != nil {
+		return nil, err
+	}
+
+	subs, ok := result.(notifier.Subscription)
+	if !ok {
+		return nil, fmt.Errorf("fatal: not a subscription")
+	}
+
+	return subs, nil
 }
 
 // Propose convenient function
@@ -40,12 +62,10 @@ func (c *Client) Propose(ctx context.Context, request any) (any, error) {
 		command = Command_Leader_CreateTaskExecution
 	case UpdateTaskExecution:
 		command = Command_Worker_UpdateTaskExecution
-	case RequestWork:
-		command = Command_Worker_RequestWork
-	case AssignTaskExecution:
-		command = Command_Leader_AssignTaskExecution
-	case Ping:
-		command = Command_Worker_Ping
+	case UpdateAvailability:
+		command = Command_Worker_UpdateAvailability
+	case NotifyTaskUpdated:
+		command = Command_Leader_NotifyTaskUpdated
 	default:
 		return nil, fmt.Errorf("unsupported type %T", req)
 	}

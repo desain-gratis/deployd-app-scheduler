@@ -73,13 +73,14 @@ func enableSchedulerModule(ctx context.Context, router *httprouter.Router) {
 	worker := genericjob_integration.NewWorker(namespace, topic, taskUsecase, taskExecutionUsecase)
 	httpAPI := genericjob_integration.NewHttpAPI(topic, genericjob.NewClient(jobAppRaft))
 
-	err = worker.Run(ctx, genericjob.NewClient(jobAppRaft))
-	if err != nil {
-		log.Fatal().Msgf("err running integration: %v", err)
-	}
 	err = jobAppRaft.Run(ctx, worker.OnBecomingRaftLeader)
 	if err != nil {
 		log.Fatal().Msgf("err running raft: %v", err)
+	}
+
+	err = worker.Run(ctx, genericjob.NewClient(jobAppRaft))
+	if err != nil {
+		log.Fatal().Msgf("err running integration: %v", err)
 	}
 
 	taskHandler := mycontentapi.New(taskUsecase, publicBaseURL+"/task", nil)

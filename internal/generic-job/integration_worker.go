@@ -4,14 +4,12 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"math/rand"
 	"sync"
 	"time"
 
 	"github.com/arcward/crong"
 	mycontent_base "github.com/desain-gratis/common/delivery/mycontent-api/mycontent/base"
 	"github.com/desain-gratis/common/lib/notifier"
-	notifier_impl "github.com/desain-gratis/common/lib/notifier/impl"
 	runneretcd "github.com/desain-gratis/common/lib/raft/runner-etcd"
 	genericjob "github.com/desain-gratis/deployd-app-scheduler/internal/raft-app/generic-job"
 	"github.com/desain-gratis/deployd-app-scheduler/src/entity"
@@ -60,97 +58,68 @@ func (w *worker) Run(ctx context.Context, client *genericjob.Client) error {
 	queue := make(map[string]chan *entity.TaskExecution)
 	queue["sendInvoice()"] = newPooledQueue(ctx, client, 30, sendInvoice)
 
-	// TODO: have "workerState" per queue; (eg how much they can take more work, or should stop RequestWork etc..)
+	// TODO: have "workerState" per queue; (eg how much they can take more work, or should stop UpdateAvailability etc..)
 
 	// each queue have their "request work" loop;
 	// we can add back-off / backpressure logic here later~
 	// right now, we're just using simple ticker, and it will always ask for more work
-	subscriber, err := w.topic.Subscribe(ctx, notifier_impl.NewStandardSubscriber(nil))
+
+	// Guarantees that we can get the latest state, and all incoming message after that
+	subscription, err := client.Subscribe(ctx)
 	if err != nil {
 		return err
 	}
 
-	subscriber.Start()
+	// We create schedule in memory using the latest state
+	w.scheduleWork(ctx, client, queue)
 
-	requestWorkTicker := time.NewTicker(2 * time.Second)
+	w.updateAvailability(ctx, client)
 
 	go func() {
-		// Request and wait, to sync the latest state
-		log.Println("WAIT FOR READY")
-		_, err = client.Propose(ctx, genericjob.Ping{Timestamp: time.Now()})
-		if err != nil {
-			return
-		}
-
-		// schedule work (according to our latest state)
-		w.scheduleWork(ctx, client, queue)
-
-		// Pings
-		go func() {
-			for {
-				if ctx.Err() != nil {
-					log.Println("why exit?!", ctx.Err())
-					return
-				}
-
-				time.Sleep(time.Duration(rand.Intn(900)+500) * time.Millisecond)
-
-				// log.Println("I'm pinging!")
-
-				t := time.Now()
-				_, err := client.Propose(ctx, genericjob.Ping{Timestamp: t})
-				if err != nil {
-					log.Printf("Error ping: %v", err)
-					continue
-				}
-			}
-		}()
-
 		// Start listening
 		for {
 			select {
 			case <-ctx.Done():
-				// bye2
 				return
-			case <-requestWorkTicker.C:
-				t := time.Now()
-
-				// request a tasks to leader if worker/executor ready for a particular queue;
-				// advertising how much resource we have, geolocation, etc~
-				// a "lock" for the next 1 hour etc..
-				// in ourcase, the worker is ready for sendInvoice()
-				// can use the "workerState"
-
-				var countWork int
-				func() {
-					defer w.scheduledLock.Unlock()
-					w.scheduledLock.Lock()
-					countWork = len(w.scheduled) // TODO: per queue
-				}()
-
-				_, err := client.Propose(ctx, genericjob.RequestWork{
-					QueueIDs: []string{"sendInvoice()"}, // todo: now hardcoded, latter we get all from list of executors queue
-					Count:    []uint64{uint64(countWork)},
-					Ping:     genericjob.Ping{Timestamp: t, SourceNodeID: client.ID(), RandomNumber: rand.Int()},
-				})
-				if err != nil {
-					log.Printf("Error requesting work: %v", err)
-					continue
-				}
-
-			case msg := <-subscriber.Listen():
-				// t := time.Now()
+			case msg := <-subscription.Listen():
 				switch msg.(type) {
-				case genericjob.EventWorkAssigned:
+				case genericjob.EventTaskExecutionUpdated:
+					// If there is an adjustment in the assignment, we do work here
+					log.Println("worker: got task execution updated event")
 					w.scheduleWork(ctx, client, queue)
-				case genericjob.EventTaskExecutionCreated:
-					//
 				}
 			}
 		}
 	}()
 
 	return nil
+}
+
+func (w *worker) updateAvailability(ctx context.Context, client *genericjob.Client) {
+	log.Printf("worker: updating availability")
+
+	// request a tasks to leader if worker/executor ready for a particular queue;
+	// advertising how much resource we have, geolocation, etc~
+	// a "lock" for the next 1 hour etc..
+	// in ourcase, the worker is ready for sendInvoice()
+	// can use the "workerState"
+
+	var countWork int
+	func() {
+		defer w.scheduledLock.Unlock()
+		w.scheduledLock.Lock()
+		countWork = len(w.scheduled) // TODO: per queue
+	}()
+
+	_, err := client.Propose(ctx, genericjob.UpdateAvailability{
+		QueueIDs: []string{"sendInvoice()"}, // todo: now hardcoded, latter we get all from list of executors queue
+		Count:    []uint64{uint64(countWork)},
+		NodeID:   client.ID(),
+	})
+	if err != nil {
+		log.Printf("Error requesting work: %v", err)
+		return
+	}
 }
 
 // Schedule work according to our "local" state
@@ -245,7 +214,7 @@ func (w *worker) scheduleWork(ctx context.Context, client *genericjob.Client, qu
 		//  && executeAt >= -evt.ExecToleranceDuration
 		if executeAt <= 0 {
 			go func() {
-				// to avoid many goroutine, use RequestWork's backpressure mechanism.
+				// to avoid many goroutine, use UpdateAvailability's backpressure mechanism.
 				for _, scheduledTask := range tasks {
 					q <- scheduledTask
 				}
@@ -297,15 +266,15 @@ func (w *worker) OnBecomingRaftLeader(ctx context.Context, term uint64, leaderID
 	// return nil
 	//TODO:
 
-	subscriber, err := w.topic.Subscribe(ctx, notifier_impl.NewStandardSubscriber(nil))
+	// Guarantees that we can get the latest state, and all incoming message after that
+	rc := runneretcd.GetRaftContext(ctx)
+	// Load all task definition from store
+	node := rc.Node()
+	client := genericjob.NewClient(rc)
+	subscription, err := client.Subscribe(ctx)
 	if err != nil {
 		return err
 	}
-	subscriber.Start()
-
-	// Load all task definition from store
-	rc := runneretcd.GetRaftContext(ctx)
-	client := genericjob.NewClient(rc)
 
 	ticker := time.NewTicker(10 * time.Second)
 
@@ -326,72 +295,81 @@ func (w *worker) OnBecomingRaftLeader(ctx context.Context, term uint64, leaderID
 
 	// request the leader (us) to send ALL task as genericjob.EventTaskNeedRegenerate event in raft
 	// to make it more consistent
-	_, err = ls.client.Propose(ctx, genericjob.RequestRegenerateTaskInstances{RefIDs: nil, ID: ""})
-	if err != nil {
-		return nil
-	}
+	// _, err = ls.client.Propose(ctx, genericjob.RequestRegenerateTaskInstances{RefIDs: nil, ID: ""})
+	// if err != nil {
+	// 	return nil
+	// }
+
+	ls.client.ID()
 
 	go func(term, leaderID uint64) {
 		defer ticker.Stop()
 		for {
 			select {
 			case <-ticker.C:
-				// log.Printf("I'm ZA LEADER. IM POLLING FOR JOBSS SCHEDULE! term=%v leaderID=%v", term, leaderID)
-
-				t0 := time.Now()
-				healthy := make(map[uint64]*entity.Node)
-				unHealthy := make(map[uint64]*entity.Node)
-
 				healthyUIDs := map[uint64]struct{}{}
 				var healthyUID uint64
-				for nodeID, node := range ls.node {
-					if t0.Sub(node.LastPing) <= ls.healthyDurationWithin {
-						healthy[nodeID] = node
-						healthyUID = nodeID // TODO:
+
+				// only available in leader
+				for nodeID, progress := range node.Status().Progress {
+					if progress.RecentActive {
 						healthyUIDs[nodeID] = struct{}{}
-					} else {
-						log.Printf("I'm detecting that this node: %v is not healthy", nodeID)
-						delete(healthy, nodeID)
-						unHealthy[nodeID] = node
+						healthyUID = nodeID // TODO: for now just select the last
 					}
 				}
 
-				if len(healthy) == 0 {
-					// skip for now
+				if len(healthyUIDs) == 0 {
+					log.Printf("leader: danger! no healthy node")
 					continue
 				}
 
-				// queueIDs := make(map[string][]genericjob.NodeQueuePair)
-				// for nodeID, node := range healthy {
-				// 	for qid, q := range node.QueueIDs {
-				// 		queueIDs[qid] = append(queueIDs[qid], genericjob.NodeQueuePair{Queue: q, NodeID: nodeID})
-				// 	}
-				// }
+				log.Printf("leader: healthy uids %v", healthyUIDs)
 
-				// // SIMPLE ASSIGNMEN ALGORITHM
-				// for _, queueState := range queueIDs {
-				// 	sort.SliceStable(queueState, func(i, j int) bool {
-				// 		return queueState[i].Queue.TaskAssigned < queueState[j].Queue.TaskAssigned
-				// 	})
-				// }
-
-				// worker will be ready to take them from it's own DB
-				_, err := client.Propose(ctx, genericjob.AssignTaskExecution{
-					ToNode:      healthyUID,
-					HealthyUIDs: healthyUIDs,
-					Queue:       []string{"sendInvoice()"},
-					Timestamp:   t0,
-				})
+				taskExecs, err := w.taskExecutionStoreRO.Stream(ctx, "deployd", nil, "")
 				if err != nil {
-					log.Printf("failed to (re)assign work: %v", err)
+					log.Printf("leader: failed to read task execution store %v", err)
+					continue
 				}
 
-			case msg := <-subscriber.Listen():
+				var notifyWorker bool
+
+				for taskExec := range taskExecs {
+					if taskExec.State != nil {
+						if _, ok := healthyUIDs[taskExec.State.AssignedNodeID]; ok {
+							continue
+						}
+						// notice we don't do "upscale" if healthy node increase :)
+						// maybe manual rebalance later :)
+					}
+
+					taskExec.State = &entity.TaskExecutionState{
+						AssignedNodeID: healthyUID,
+					}
+
+					_, err := client.Propose(ctx, genericjob.UpdateTaskExecution(taskExec))
+					if err != nil {
+						// determien error, maybe panic or maybe just fail
+						log.Printf("failed to (re)assign work: %v", err)
+					}
+					notifyWorker = true
+				}
+
+				if notifyWorker {
+					log.Printf("leader: notifying workers that there is an update in task execution table")
+					// worker will be ready to take them from it's own DB
+					_, err := client.Propose(ctx, genericjob.NotifyTaskUpdated{})
+					if err != nil {
+						log.Printf("failed to (re)assign work: %v", err)
+					}
+				} else {
+					log.Printf("leader: all good in the scheduler world")
+				}
+			case msg := <-subscription.Listen():
 				t := time.Now()
 
 				switch evt := msg.(type) {
 				case genericjob.EventTaskCreated, genericjob.EventTaskNeedRegenerate:
-					log.Printf("A new task definition has come. I better schedule! %+v", evt)
+					log.Printf("leader: a new task definition has come. I better schedule! %+v", evt)
 					task := getTask(evt)
 					if task == nil {
 						// TODO: error inside the raft app, can check which causes empty event
@@ -415,17 +393,12 @@ func (w *worker) OnBecomingRaftLeader(ctx context.Context, term uint64, leaderID
 					// worker request a work
 
 					// update the "worker pool"
-
-					ls.getNode(evt.SourceNodeID).LastPing = evt.Timestamp
 					for idx, q := range evt.QueueIDs {
 						capacity := evt.Count[idx]
-						queue := ls.getNodeQueueState(evt.SourceNodeID, q)
+						queue := ls.getNodeQueueState(evt.NodeID, q)
 						queue.Capacity = capacity
 					}
 
-				case genericjob.Ping:
-					// update ping from the workers (including our node)
-					ls.getNode(evt.SourceNodeID).LastPing = evt.Timestamp
 				default:
 					// log.Printf("Unknown job evt")
 				}

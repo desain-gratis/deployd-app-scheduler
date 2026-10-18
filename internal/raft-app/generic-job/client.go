@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	runneretcd "github.com/desain-gratis/common/lib/raft/runner-etcd"
 )
@@ -41,6 +42,8 @@ func (c *Client) Propose(ctx context.Context, request any) (any, error) {
 		command = Command_Worker_UpdateTaskExecution
 	case RequestWork:
 		command = Command_Worker_RequestWork
+	case AssignTaskExecution:
+		command = Command_Leader_AssignTaskExecution
 	case Ping:
 		command = Command_Worker_Ping
 	default:
@@ -54,7 +57,10 @@ func (c *Client) Propose(ctx context.Context, request any) (any, error) {
 
 	cmdWrap := CommandWrapper{Name: command, Value: payload}
 
-	result, err := c.raftClient.Propose(ctx, cmdWrap)
+	ctx2, cancel := context.WithTimeout(ctx, 5*time.Second) // IMPORTANT to avoid stuck; TODO: ALL USE TIMEOUT FOR DG
+	defer cancel()
+
+	result, err := c.raftClient.Propose(ctx2, cmdWrap)
 	if err != nil {
 		return nil, err
 	}

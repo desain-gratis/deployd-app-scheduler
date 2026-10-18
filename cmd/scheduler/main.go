@@ -70,7 +70,7 @@ func enableSchedulerModule(ctx context.Context, router *httprouter.Router) {
 	taskUsecase := jobApp.GetTaskStore()
 	taskExecutionUsecase := jobApp.GetTaskExecutionStore()
 
-	worker := genericjob_integration.NewWorker(topic, taskUsecase, taskExecutionUsecase)
+	worker := genericjob_integration.NewWorker(namespace, topic, taskUsecase, taskExecutionUsecase)
 	httpAPI := genericjob_integration.NewHttpAPI(topic, genericjob.NewClient(jobAppRaft))
 
 	err = worker.Run(ctx, genericjob.NewClient(jobAppRaft))

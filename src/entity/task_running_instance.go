@@ -33,7 +33,7 @@ type TaskExecution struct {
 }
 
 type TaskExecutionState struct {
-	AssignedNodeID uint64 `json:"assigned_node_id"` // which node the worker communicates with
+	AssignedNodeID uint64 `json:"assigned_node_id"` // Who to execute this task, as assigned by the Leader
 }
 
 type ExecutionStatus string

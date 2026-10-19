@@ -14,6 +14,7 @@ import (
 	genericjob "github.com/desain-gratis/deployd-app-scheduler/internal/raft-app/generic-job"
 	"github.com/desain-gratis/deployd-app-scheduler/src/entity"
 	"github.com/google/uuid"
+	"go.etcd.io/raft/v3"
 )
 
 const maxScheduledInstancePerTask = 100
@@ -56,7 +57,8 @@ func NewWorker(
 
 func (w *worker) Run(ctx context.Context, client *genericjob.Client) error {
 	queue := make(map[string]chan *entity.TaskExecution)
-	queue["sendInvoice()"] = newPooledQueue(ctx, client, 30, sendInvoice)
+	queue["sendInvoice()"] = NewPooledQueue(ctx, client, 30, sendInvoice)
+	queue["echoReverse()"] = NewPooledQueue(ctx, client, 30, echoReverse)
 
 	// TODO: have "workerState" per queue; (eg how much they can take more work, or should stop UpdateAvailability etc..)
 
@@ -82,11 +84,27 @@ func (w *worker) Run(ctx context.Context, client *genericjob.Client) error {
 			case <-ctx.Done():
 				return
 			case msg := <-subscription.Listen():
-				switch msg.(type) {
+				switch evt := msg.(type) {
 				case genericjob.EventTaskExecutionUpdated:
 					// If there is an adjustment in the assignment, we do work here
 					log.Println("worker: got task execution updated event")
 					w.scheduleWork(ctx, client, queue)
+				case genericjob.EventTaskExecutionCreated:
+					// TODO: refactor2
+					if evt.State == nil || evt.State.AssignedNodeID != client.ID() {
+						continue
+					}
+
+					log.Println("worker: got immediate task")
+
+					q, ok := queue[evt.QueueID]
+					if !ok {
+						// queue not found
+						log.Printf("worker: queue %v not found", evt.QueueID)
+						continue
+					}
+
+					q <- evt
 				}
 			}
 		}
@@ -185,6 +203,7 @@ func (w *worker) scheduleWork(ctx context.Context, client *genericjob.Client, qu
 		q, ok := queue[tg.queueID]
 		if !ok {
 			// queue not found
+			log.Printf("warn: queue %v not found", tg.queueID)
 			continue
 		}
 
@@ -263,23 +282,16 @@ type timeQueue struct {
 // Context will be cancelled when stepping down from raft leader
 func (w *worker) OnBecomingRaftLeader(ctx context.Context, term uint64, leaderID uint64) error {
 
-	// return nil
-	//TODO:
+	ticker := time.NewTicker(10 * time.Second)
+
+	timers := make(map[string]*time.Timer)
+	timersLock := &sync.RWMutex{}
 
 	// Guarantees that we can get the latest state, and all incoming message after that
 	rc := runneretcd.GetRaftContext(ctx)
 	// Load all task definition from store
 	node := rc.Node()
 	client := genericjob.NewClient(rc)
-	subscription, err := client.Subscribe(ctx)
-	if err != nil {
-		return err
-	}
-
-	ticker := time.NewTicker(10 * time.Second)
-
-	timers := make(map[string]*time.Timer)
-	timersLock := &sync.RWMutex{}
 
 	ls := leaderState{
 		client:     client,
@@ -293,14 +305,10 @@ func (w *worker) OnBecomingRaftLeader(ctx context.Context, term uint64, leaderID
 		healthyDurationWithin: 10 * time.Second,
 	}
 
-	// request the leader (us) to send ALL task as genericjob.EventTaskNeedRegenerate event in raft
-	// to make it more consistent
-	// _, err = ls.client.Propose(ctx, genericjob.RequestRegenerateTaskInstances{RefIDs: nil, ID: ""})
-	// if err != nil {
-	// 	return nil
-	// }
-
-	ls.client.ID()
+	subscription, err := client.Subscribe(ctx)
+	if err != nil {
+		return err
+	}
 
 	go func(term, leaderID uint64) {
 		defer ticker.Stop()
@@ -346,6 +354,9 @@ func (w *worker) OnBecomingRaftLeader(ctx context.Context, term uint64, leaderID
 						AssignedNodeID: healthyUID,
 					}
 
+					// TODO: use batch inside the raft to make it more efficient
+					// but it needed the allocation algorithm to be deterministic
+					// (eg. it will be the same accross all nodes)
 					_, err := client.Propose(ctx, genericjob.UpdateTaskExecution(taskExec))
 					if err != nil {
 						// determien error, maybe panic or maybe just fail
@@ -376,16 +387,24 @@ func (w *worker) OnBecomingRaftLeader(ctx context.Context, term uint64, leaderID
 						continue
 					}
 
-					if task.ExecutionStrategy != entity.ExecutionStrategyScheduled {
+					switch task.ExecutionStrategy {
+					case entity.ExecutionStrategyImmediate:
+						err := ls.generateImmediateTaskExecutionInstances(ctx, task, t, node)
+						if err != nil {
+							log.Printf("leader: err creating immediate task execution instances %v", err)
+							continue
+						}
+
+					case entity.ExecutionStrategyScheduled:
+						err := ls.generateScheduledTaskExecutionInstances(ctx, task, t)
+						if err != nil {
+							log.Printf("leader: err creating scheduled task execution instances %v", err)
+							continue
+						}
+					default:
 						log.Printf("[warn] unsupported execution strategy: %v", task.ExecutionStrategy)
-						continue
 					}
 
-					err := ls.generateScheduledTaskExecutionInstances(ctx, task, t)
-					if err != nil {
-						log.Printf("ERR SCHEDULE %v", err)
-						continue
-					}
 				case genericjob.EventTaskUpdated:
 					// task updated! we don't do anything.
 
@@ -440,6 +459,46 @@ func (ls *leaderState) cancelAllScheduledExecutions(ctx context.Context, task *e
 	// TODO:
 	// maybe the cron definition changed, or manually cancelled (I don't want to run this tasks.)
 	// only if it's already in memory ofcourse
+	return nil
+}
+
+func (ls *leaderState) generateImmediateTaskExecutionInstances(ctx context.Context, task *entity.Task, serverTime time.Time, raftNode raft.Node) error {
+	healthyUIDs := map[uint64]struct{}{}
+	var healthyUID uint64
+
+	// only available in leader
+	for nodeID, progress := range raftNode.Status().Progress {
+		if progress.RecentActive {
+			healthyUIDs[nodeID] = struct{}{}
+			healthyUID = nodeID // TODO: for now just select the last
+		}
+	}
+
+	if len(healthyUIDs) == 0 {
+		return fmt.Errorf("leader: node not available")
+	}
+
+	state := &entity.TaskExecution{
+		Ns:             task.Ns,
+		Id:             uuid.NewString(),
+		TaskID:         task.Id,
+		QueueID:        task.QueueID,
+		ScheduledRunAt: time.Now(),
+		Status:         entity.ExecutionStatusPending,
+		PublishedAt:    serverTime,
+		Input:          task.Input,
+		UserTime:       task.UserTime,
+		State: &entity.TaskExecutionState{
+			AssignedNodeID: healthyUID, // assign executor node immediately
+		},
+	}
+
+	_, err := ls.client.Propose(ctx, genericjob.CreateTaskExecution(state))
+	if err != nil {
+		log.Printf("ERROR create task execution instance: %v\n", err)
+		return err
+	}
+
 	return nil
 }
 

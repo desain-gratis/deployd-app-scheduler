@@ -1,0 +1,11 @@
+{
+	"namespace": "deployd",
+	"queue_id": "echoReverse()",
+
+	"input": "Hello, World!",
+
+	"execution_strategy": "IMMEDIATE",
+	"execution_strategy_input": {},
+
+	"user_time": "2026-10-08T15:04:05+07:00"
+}

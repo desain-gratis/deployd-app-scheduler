@@ -14,3 +14,22 @@ func sendInvoice(taskExec *entity.TaskExecution) error {
 
 	return nil
 }
+
+func echoReverse(taskExec *entity.TaskExecution) error {
+	b, ok := taskExec.Input.(string)
+	if !ok {
+		taskExec.Output = "Not a byte"
+		return nil
+	}
+
+	runes := []rune(string(b))
+	for i, j := 0, len(runes)-1; i < j; i, j = i+1, j-1 {
+		runes[i], runes[j] = runes[j], runes[i]
+	}
+
+	taskExec.Output = string(runes)
+
+	log.Printf("The task echoReverse(): %v triggered! result: %v", string(runes))
+
+	return nil
+}

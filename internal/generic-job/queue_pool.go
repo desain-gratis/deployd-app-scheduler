@@ -9,7 +9,9 @@ import (
 	"github.com/desain-gratis/deployd-app-scheduler/src/entity"
 )
 
-func newPooledQueue(ctx context.Context, client *genericjob.Client, count int, fn func(task *entity.TaskExecution) error) chan *entity.TaskExecution {
+type TaskHandler func(task *entity.TaskExecution) error
+
+func NewPooledQueue(ctx context.Context, client *genericjob.Client, count int, fn TaskHandler) chan *entity.TaskExecution {
 	// simple workers
 	queue := make(chan *entity.TaskExecution)
 

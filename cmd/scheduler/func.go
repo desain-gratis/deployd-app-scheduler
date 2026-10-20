@@ -29,7 +29,7 @@ func echoReverse(taskExec *entity.TaskExecution) error {
 
 	taskExec.Output = string(runes)
 
-	log.Printf("The task echoReverse(): %v triggered! result: %v", string(runes))
+	log.Printf("The task echoReverse(): triggered! result: %v", string(runes))
 
 	return nil
 }

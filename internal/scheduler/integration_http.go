@@ -1,4 +1,4 @@
-package genericjob
+package scheduler
 
 import (
 	"encoding/json"
@@ -8,18 +8,18 @@ import (
 	"time"
 
 	"github.com/desain-gratis/common/lib/notifier"
-	genericjob "github.com/desain-gratis/deployd-app-scheduler/internal/raft-app/generic-job"
+	"github.com/desain-gratis/deployd-app-scheduler/internal/raft-app/scheduler"
 	"github.com/desain-gratis/deployd-app-scheduler/src/entity"
 	"github.com/google/uuid"
 	"github.com/julienschmidt/httprouter"
 )
 
 type httpAPI struct {
-	rc *genericjob.Client
+	rc *scheduler.Client
 }
 
 // or background process I guess
-func NewHttpAPI(topic notifier.Topic, rc *genericjob.Client) *httpAPI {
+func NewHttpAPI(topic notifier.Topic, rc *scheduler.Client) *httpAPI {
 	return &httpAPI{rc: rc}
 }
 
@@ -46,7 +46,7 @@ func (h *httpAPI) CreateTask(w http.ResponseWriter, r *http.Request, p httproute
 	taskDefinition.Id = uuid.NewString()
 
 	// server do something
-	data := genericjob.CreateTask{
+	data := scheduler.CreateTask{
 		Task:       taskDefinition,
 		ServerTime: time.Now(),
 	}

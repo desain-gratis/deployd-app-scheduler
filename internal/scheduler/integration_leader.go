@@ -1,4 +1,4 @@
-package genericjob
+package scheduler
 
 import (
 	"context"
@@ -8,14 +8,14 @@ import (
 	"time"
 
 	"github.com/arcward/crong"
-	genericjob "github.com/desain-gratis/deployd-app-scheduler/internal/raft-app/generic-job"
+	"github.com/desain-gratis/deployd-app-scheduler/internal/raft-app/scheduler"
 	"github.com/desain-gratis/deployd-app-scheduler/src/entity"
 	"github.com/google/uuid"
 	"go.etcd.io/raft/v3"
 )
 
 type leaderState struct {
-	client     *genericjob.Client
+	client     *scheduler.Client
 	timersLock *sync.RWMutex
 	timers     map[string]*time.Timer
 	id         uint64
@@ -65,7 +65,7 @@ func (ls *leaderState) generateImmediateTaskExecutionInstances(ctx context.Conte
 		},
 	}
 
-	_, err := ls.client.Propose(ctx, genericjob.CreateTaskExecution(state))
+	_, err := ls.client.Propose(ctx, scheduler.CreateTaskExecution(state))
 	if err != nil {
 		log.Printf("ERROR create task execution instance: %v\n", err)
 		return err
@@ -138,7 +138,7 @@ func (ls *leaderState) generateScheduledTaskExecutionInstances(ctx context.Conte
 			UserTime:       task.UserTime,
 		}
 
-		_, err := ls.client.Propose(ctx, genericjob.CreateTaskExecution(state))
+		_, err := ls.client.Propose(ctx, scheduler.CreateTaskExecution(state))
 		if err != nil {
 			log.Printf("ERROR create task execution instance: %v\n", err)
 			continue
@@ -155,7 +155,7 @@ func (ls *leaderState) generateScheduledTaskExecutionInstances(ctx context.Conte
 		LastGenerateEnd:   lastGeneratedEnd,
 	}
 
-	result, err := ls.client.Propose(ctx, genericjob.UpdateTask{
+	result, err := ls.client.Propose(ctx, scheduler.UpdateTask{
 		Task:       *task,
 		ServerTime: serverTime,
 	})
@@ -178,7 +178,7 @@ func (ls *leaderState) scheduleNextGenerate(ctx context.Context, t time.Duration
 	// Schedule for next generate trigger for this task
 	_ = time.AfterFunc(t, func() {
 		// to trigger the tick
-		_, err := ls.client.Propose(ctx, genericjob.RequestRegenerateTaskInstances{RefIDs: task.RefIDs(), ID: task.ID()})
+		_, err := ls.client.Propose(ctx, scheduler.RequestRegenerateTaskInstances{RefIDs: task.RefIDs(), ID: task.ID()})
 		if err != nil {
 			log.Printf("Error scheduling next generate time")
 			return

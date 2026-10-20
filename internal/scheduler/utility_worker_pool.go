@@ -1,11 +1,11 @@
-package genericjob
+package scheduler
 
 import (
 	"context"
 	"log"
 	"time"
 
-	genericjob "github.com/desain-gratis/deployd-app-scheduler/internal/raft-app/generic-job"
+	genericjob "github.com/desain-gratis/deployd-app-scheduler/internal/raft-app/scheduler"
 	"github.com/desain-gratis/deployd-app-scheduler/src/entity"
 )
 

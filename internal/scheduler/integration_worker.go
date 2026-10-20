@@ -1,4 +1,4 @@
-package genericjob
+package scheduler
 
 import (
 	"context"
@@ -9,7 +9,7 @@ import (
 	mycontent_base "github.com/desain-gratis/common/delivery/mycontent-api/mycontent/base"
 	"github.com/desain-gratis/common/lib/notifier"
 	runneretcd "github.com/desain-gratis/common/lib/raft/runner-etcd"
-	genericjob "github.com/desain-gratis/deployd-app-scheduler/internal/raft-app/generic-job"
+	"github.com/desain-gratis/deployd-app-scheduler/internal/raft-app/scheduler"
 	"github.com/desain-gratis/deployd-app-scheduler/src/entity"
 )
 
@@ -29,7 +29,7 @@ type worker struct {
 	scheduledLock *sync.Mutex
 
 	queue  map[string]chan *entity.TaskExecution
-	client *genericjob.Client
+	client *scheduler.Client
 }
 type queueTaskPair struct {
 	queueID string
@@ -40,7 +40,7 @@ type queueTaskPair struct {
 func NewWorker(
 	namespace string,
 	topic notifier.Topic,
-	client *genericjob.Client,
+	client *scheduler.Client,
 	taskDefinitionStoreRO *mycontent_base.Handler[*entity.Task],
 	taskExecutionStoreRO *mycontent_base.Handler[*entity.TaskExecution],
 	queue map[string]chan *entity.TaskExecution,
@@ -82,11 +82,11 @@ func (w *worker) Run(ctx context.Context) error {
 				return
 			case msg := <-subscription.Listen():
 				switch evt := msg.(type) {
-				case genericjob.EventTaskExecutionUpdated:
+				case scheduler.EventTaskExecutionUpdated:
 					// If there is an adjustment in the assignment, we do work here
 					log.Println("worker: got task execution updated event")
 					w.scheduleWork(ctx)
-				case genericjob.EventTaskExecutionCreated:
+				case scheduler.EventTaskExecutionCreated:
 					// TODO: refactor2
 					if evt.State == nil || evt.State.AssignedNodeID != w.client.ID() {
 						continue
@@ -118,7 +118,7 @@ func (w *worker) updateAvailability(ctx context.Context) {
 		queueList = append(queueList, queueName)
 	}
 
-	_, err := w.client.Propose(ctx, genericjob.UpdateAvailability{
+	_, err := w.client.Propose(ctx, scheduler.UpdateAvailability{
 		QueueIDs: queueList, // todo: now hardcoded, latter we get all from list of executors queue
 		NodeID:   w.client.ID(),
 	})
@@ -320,7 +320,7 @@ func (w *worker) OnBecomingRaftLeader(ctx context.Context, term uint64, leaderID
 					// TODO: use batch inside the raft to make it more efficient
 					// but it needed the allocation algorithm to be deterministic
 					// (eg. it will be the same accross all nodes)
-					_, err := w.client.Propose(ctx, genericjob.UpdateTaskExecution(taskExec))
+					_, err := w.client.Propose(ctx, scheduler.UpdateTaskExecution(taskExec))
 					if err != nil {
 						// determien error, maybe panic or maybe just fail
 						log.Printf("failed to (re)assign work: %v", err)
@@ -331,7 +331,7 @@ func (w *worker) OnBecomingRaftLeader(ctx context.Context, term uint64, leaderID
 				if notifyWorker {
 					log.Printf("leader: notifying workers that there is an update in task execution table")
 					// worker will be ready to take them from it's own DB
-					_, err := w.client.Propose(ctx, genericjob.NotifyTaskUpdated{})
+					_, err := w.client.Propose(ctx, scheduler.NotifyTaskUpdated{})
 					if err != nil {
 						log.Printf("failed to (re)assign work: %v", err)
 					}
@@ -342,7 +342,7 @@ func (w *worker) OnBecomingRaftLeader(ctx context.Context, term uint64, leaderID
 				t := time.Now()
 
 				switch evt := msg.(type) {
-				case genericjob.EventTaskCreated, genericjob.EventTaskNeedRegenerate:
+				case scheduler.EventTaskCreated, scheduler.EventTaskNeedRegenerate:
 					log.Printf("leader: a new task definition has come. I better schedule! %+v", evt)
 					task := getTask(evt)
 					if task == nil {
@@ -368,10 +368,10 @@ func (w *worker) OnBecomingRaftLeader(ctx context.Context, term uint64, leaderID
 						log.Printf("[warn] unsupported execution strategy: %v", task.ExecutionStrategy)
 					}
 
-				case genericjob.EventTaskUpdated:
+				case scheduler.EventTaskUpdated:
 					// task updated! we don't do anything.
 
-				case genericjob.EventWorkerRequestedWork:
+				case scheduler.EventWorkerRequestedWork:
 					// worker request a work
 
 				default:
@@ -389,9 +389,9 @@ func (w *worker) OnBecomingRaftLeader(ctx context.Context, term uint64, leaderID
 // utility to retrieve task from task-ish alias
 func getTask(taskish any) *entity.Task {
 	switch task := taskish.(type) {
-	case genericjob.EventTaskCreated:
+	case scheduler.EventTaskCreated:
 		return (*entity.Task)(task)
-	case genericjob.EventTaskUpdated:
+	case scheduler.EventTaskUpdated:
 		return (*entity.Task)(task)
 	}
 

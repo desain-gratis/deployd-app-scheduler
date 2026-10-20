@@ -15,8 +15,8 @@ import (
 	mycontentapi "github.com/desain-gratis/common/delivery/mycontent-api"
 	notifier_impl "github.com/desain-gratis/common/lib/notifier/impl"
 	runneretcd "github.com/desain-gratis/common/lib/raft/runner-etcd"
-	genericjob_integration "github.com/desain-gratis/deployd-app-scheduler/internal/generic-job"
-	genericjob "github.com/desain-gratis/deployd-app-scheduler/internal/raft-app/generic-job"
+	"github.com/desain-gratis/deployd-app-scheduler/internal/raft-app/scheduler"
+	scheduler_integration "github.com/desain-gratis/deployd-app-scheduler/internal/scheduler"
 	"github.com/desain-gratis/deployd-app-scheduler/src/entity"
 )
 
@@ -61,26 +61,26 @@ func enableSchedulerModule(ctx context.Context, router *httprouter.Router) {
 	topic := notifier_impl.NewStandardTopic()
 
 	namespace := "deployd"
-	jobApp := genericjob.New(namespace, topic, db)
+	schedulerApp := scheduler.New(namespace, topic, db)
 
-	schedulerRaft, _, err := runneretcd.RunWithConfig(ctx, os.Getenv("DEPLOYD_RAFT"), "scheduler", jobApp)
+	schedulerRaft, _, err := runneretcd.RunWithConfig(ctx, os.Getenv("DEPLOYD_RAFT"), "scheduler", schedulerApp)
 	if err != nil {
 		log.Fatal().Msgf("err running raft: %v", err)
 	}
 
-	taskUsecase := jobApp.GetTaskStore()
-	taskExecutionUsecase := jobApp.GetTaskExecutionStore()
+	taskUsecase := schedulerApp.GetTaskStore()
+	taskExecutionUsecase := schedulerApp.GetTaskExecutionStore()
 
-	schedulerClient := genericjob.NewClient(schedulerRaft)
+	schedulerClient := scheduler.NewClient(schedulerRaft)
 
 	// List of functions to be executed inside scheduler
 	queue := map[string]chan *entity.TaskExecution{
-		"sendInvoice()": genericjob_integration.NewPooledQueue(ctx, schedulerClient, 30, sendInvoice),
-		"echoReverse()": genericjob_integration.NewPooledQueue(ctx, schedulerClient, 30, echoReverse),
+		"sendInvoice()": scheduler_integration.NewPooledQueue(ctx, schedulerClient, 30, sendInvoice),
+		"echoReverse()": scheduler_integration.NewPooledQueue(ctx, schedulerClient, 30, echoReverse),
 	}
 
-	worker := genericjob_integration.NewWorker(namespace, topic, schedulerClient, taskUsecase, taskExecutionUsecase, queue)
-	httpAPI := genericjob_integration.NewHttpAPI(topic, schedulerClient)
+	worker := scheduler_integration.NewWorker(namespace, topic, schedulerClient, taskUsecase, taskExecutionUsecase, queue)
+	httpAPI := scheduler_integration.NewHttpAPI(topic, schedulerClient)
 
 	err = schedulerRaft.Run(ctx, worker.OnBecomingRaftLeader)
 	if err != nil {

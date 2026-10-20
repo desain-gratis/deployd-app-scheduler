@@ -272,7 +272,6 @@ type UpdateTaskExecution *entity.TaskExecution
 type UpdateAvailability struct {
 	NodeID   uint64
 	QueueIDs []string
-	Count    []uint64 // arbitrary unit
 }
 
 // Notifies worker that task execution tables have been updated

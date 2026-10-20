@@ -17,6 +17,7 @@ import (
 	runneretcd "github.com/desain-gratis/common/lib/raft/runner-etcd"
 	genericjob_integration "github.com/desain-gratis/deployd-app-scheduler/internal/generic-job"
 	genericjob "github.com/desain-gratis/deployd-app-scheduler/internal/raft-app/generic-job"
+	"github.com/desain-gratis/deployd-app-scheduler/src/entity"
 )
 
 const (
@@ -62,7 +63,7 @@ func enableSchedulerModule(ctx context.Context, router *httprouter.Router) {
 	namespace := "deployd"
 	jobApp := genericjob.New(namespace, topic, db)
 
-	jobAppRaft, _, err := runneretcd.RunWithConfig(ctx, os.Getenv("DEPLOYD_RAFT"), "scheduler", jobApp)
+	schedulerRaft, _, err := runneretcd.RunWithConfig(ctx, os.Getenv("DEPLOYD_RAFT"), "scheduler", jobApp)
 	if err != nil {
 		log.Fatal().Msgf("err running raft: %v", err)
 	}
@@ -70,15 +71,23 @@ func enableSchedulerModule(ctx context.Context, router *httprouter.Router) {
 	taskUsecase := jobApp.GetTaskStore()
 	taskExecutionUsecase := jobApp.GetTaskExecutionStore()
 
-	worker := genericjob_integration.NewWorker(namespace, topic, taskUsecase, taskExecutionUsecase)
-	httpAPI := genericjob_integration.NewHttpAPI(topic, genericjob.NewClient(jobAppRaft))
+	schedulerClient := genericjob.NewClient(schedulerRaft)
 
-	err = jobAppRaft.Run(ctx, worker.OnBecomingRaftLeader)
+	// List of functions to be executed inside scheduler
+	queue := map[string]chan *entity.TaskExecution{
+		"sendInvoice()": genericjob_integration.NewPooledQueue(ctx, schedulerClient, 30, sendInvoice),
+		"echoReverse()": genericjob_integration.NewPooledQueue(ctx, schedulerClient, 30, echoReverse),
+	}
+
+	worker := genericjob_integration.NewWorker(namespace, topic, schedulerClient, taskUsecase, taskExecutionUsecase, queue)
+	httpAPI := genericjob_integration.NewHttpAPI(topic, schedulerClient)
+
+	err = schedulerRaft.Run(ctx, worker.OnBecomingRaftLeader)
 	if err != nil {
 		log.Fatal().Msgf("err running raft: %v", err)
 	}
 
-	err = worker.Run(ctx, genericjob.NewClient(jobAppRaft))
+	err = worker.Run(ctx)
 	if err != nil {
 		log.Fatal().Msgf("err running integration: %v", err)
 	}

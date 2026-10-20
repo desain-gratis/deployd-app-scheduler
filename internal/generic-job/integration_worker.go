@@ -2,19 +2,15 @@ package genericjob
 
 import (
 	"context"
-	"fmt"
 	"log"
 	"sync"
 	"time"
 
-	"github.com/arcward/crong"
 	mycontent_base "github.com/desain-gratis/common/delivery/mycontent-api/mycontent/base"
 	"github.com/desain-gratis/common/lib/notifier"
 	runneretcd "github.com/desain-gratis/common/lib/raft/runner-etcd"
 	genericjob "github.com/desain-gratis/deployd-app-scheduler/internal/raft-app/generic-job"
 	"github.com/desain-gratis/deployd-app-scheduler/src/entity"
-	"github.com/google/uuid"
-	"go.etcd.io/raft/v3"
 )
 
 const maxScheduledInstancePerTask = 100
@@ -31,6 +27,9 @@ type worker struct {
 	// task IDs
 	scheduled     map[queueTaskPair]struct{}
 	scheduledLock *sync.Mutex
+
+	queue  map[string]chan *entity.TaskExecution
+	client *genericjob.Client
 }
 type queueTaskPair struct {
 	queueID string
@@ -41,8 +40,10 @@ type queueTaskPair struct {
 func NewWorker(
 	namespace string,
 	topic notifier.Topic,
+	client *genericjob.Client,
 	taskDefinitionStoreRO *mycontent_base.Handler[*entity.Task],
 	taskExecutionStoreRO *mycontent_base.Handler[*entity.TaskExecution],
+	queue map[string]chan *entity.TaskExecution,
 ) *worker {
 	return &worker{
 		topic:                 topic,
@@ -52,14 +53,11 @@ func NewWorker(
 		namespace:             namespace,
 		scheduled:             map[queueTaskPair]struct{}{},
 		scheduledLock:         &sync.Mutex{},
+		queue:                 make(map[string]chan *entity.TaskExecution),
 	}
 }
 
-func (w *worker) Run(ctx context.Context, client *genericjob.Client) error {
-	queue := make(map[string]chan *entity.TaskExecution)
-	queue["sendInvoice()"] = NewPooledQueue(ctx, client, 30, sendInvoice)
-	queue["echoReverse()"] = NewPooledQueue(ctx, client, 30, echoReverse)
-
+func (w *worker) Run(ctx context.Context) error {
 	// TODO: have "workerState" per queue; (eg how much they can take more work, or should stop UpdateAvailability etc..)
 
 	// each queue have their "request work" loop;
@@ -67,15 +65,14 @@ func (w *worker) Run(ctx context.Context, client *genericjob.Client) error {
 	// right now, we're just using simple ticker, and it will always ask for more work
 
 	// Guarantees that we can get the latest state, and all incoming message after that
-	subscription, err := client.Subscribe(ctx)
+	subscription, err := w.client.Subscribe(ctx)
 	if err != nil {
 		return err
 	}
 
 	// We create schedule in memory using the latest state
-	w.scheduleWork(ctx, client, queue)
-
-	w.updateAvailability(ctx, client)
+	w.scheduleWork(ctx)
+	w.updateAvailability(ctx)
 
 	go func() {
 		// Start listening
@@ -88,16 +85,16 @@ func (w *worker) Run(ctx context.Context, client *genericjob.Client) error {
 				case genericjob.EventTaskExecutionUpdated:
 					// If there is an adjustment in the assignment, we do work here
 					log.Println("worker: got task execution updated event")
-					w.scheduleWork(ctx, client, queue)
+					w.scheduleWork(ctx)
 				case genericjob.EventTaskExecutionCreated:
 					// TODO: refactor2
-					if evt.State == nil || evt.State.AssignedNodeID != client.ID() {
+					if evt.State == nil || evt.State.AssignedNodeID != w.client.ID() {
 						continue
 					}
 
 					log.Println("worker: got immediate task")
 
-					q, ok := queue[evt.QueueID]
+					q, ok := w.queue[evt.QueueID]
 					if !ok {
 						// queue not found
 						log.Printf("worker: queue %v not found", evt.QueueID)
@@ -113,26 +110,17 @@ func (w *worker) Run(ctx context.Context, client *genericjob.Client) error {
 	return nil
 }
 
-func (w *worker) updateAvailability(ctx context.Context, client *genericjob.Client) {
+func (w *worker) updateAvailability(ctx context.Context) {
 	log.Printf("worker: updating availability")
 
-	// request a tasks to leader if worker/executor ready for a particular queue;
-	// advertising how much resource we have, geolocation, etc~
-	// a "lock" for the next 1 hour etc..
-	// in ourcase, the worker is ready for sendInvoice()
-	// can use the "workerState"
+	queueList := make([]string, 0, len(w.queue))
+	for queueName := range w.queue {
+		queueList = append(queueList, queueName)
+	}
 
-	var countWork int
-	func() {
-		defer w.scheduledLock.Unlock()
-		w.scheduledLock.Lock()
-		countWork = len(w.scheduled) // TODO: per queue
-	}()
-
-	_, err := client.Propose(ctx, genericjob.UpdateAvailability{
-		QueueIDs: []string{"sendInvoice()"}, // todo: now hardcoded, latter we get all from list of executors queue
-		Count:    []uint64{uint64(countWork)},
-		NodeID:   client.ID(),
+	_, err := w.client.Propose(ctx, genericjob.UpdateAvailability{
+		QueueIDs: queueList, // todo: now hardcoded, latter we get all from list of executors queue
+		NodeID:   w.client.ID(),
 	})
 	if err != nil {
 		log.Printf("Error requesting work: %v", err)
@@ -142,7 +130,7 @@ func (w *worker) updateAvailability(ctx context.Context, client *genericjob.Clie
 
 // Schedule work according to our "local" state
 // We should Propose to raft firt, to get the very latest state.
-func (w *worker) scheduleWork(ctx context.Context, client *genericjob.Client, queue map[string]chan *entity.TaskExecution) {
+func (w *worker) scheduleWork(ctx context.Context) {
 	tgs := make(map[timeQueue][]*entity.TaskExecution)
 
 	for _, queue := range []string{"sendInvoice()"} {
@@ -165,7 +153,7 @@ func (w *worker) scheduleWork(ctx context.Context, client *genericjob.Client, qu
 				continue
 			}
 
-			if taskExec.State.AssignedNodeID != client.ID() {
+			if taskExec.State.AssignedNodeID != w.client.ID() {
 				// don't schedule other people task :)
 				continue
 			}
@@ -200,7 +188,7 @@ func (w *worker) scheduleWork(ctx context.Context, client *genericjob.Client, qu
 	// TODO: worker type, registered to server (for work assignment logic/strategy)
 
 	for tg := range tgs {
-		q, ok := queue[tg.queueID]
+		q, ok := w.queue[tg.queueID]
 		if !ok {
 			// queue not found
 			log.Printf("warn: queue %v not found", tg.queueID)
@@ -230,7 +218,6 @@ func (w *worker) scheduleWork(ctx context.Context, client *genericjob.Client, qu
 			}
 		})
 
-		//  && executeAt >= -evt.ExecToleranceDuration
 		if executeAt <= 0 {
 			go func() {
 				// to avoid many goroutine, use UpdateAvailability's backpressure mechanism.
@@ -247,29 +234,6 @@ func (w *worker) scheduleWork(ctx context.Context, client *genericjob.Client, qu
 			}()
 		}
 	}
-}
-
-func (m *leaderState) getNode(nodeID uint64) *entity.Node {
-	_, ok := m.node[nodeID]
-	if !ok {
-		m.node[nodeID] = &entity.Node{QueueIDs: make(map[string]*entity.QueueState)}
-	}
-
-	return m.node[nodeID]
-}
-
-func (m *leaderState) getNodeQueueState(nodeID uint64, queueID string) *entity.QueueState {
-	_, ok := m.node[nodeID]
-	if !ok {
-		m.node[nodeID] = &entity.Node{QueueIDs: make(map[string]*entity.QueueState)}
-	}
-
-	_, ok = m.node[nodeID].QueueIDs[queueID]
-	if !ok {
-		m.node[nodeID].QueueIDs[queueID] = &entity.QueueState{}
-	}
-
-	return m.node[nodeID].QueueIDs[queueID]
 }
 
 type timeQueue struct {
@@ -291,10 +255,9 @@ func (w *worker) OnBecomingRaftLeader(ctx context.Context, term uint64, leaderID
 	rc := runneretcd.GetRaftContext(ctx)
 	// Load all task definition from store
 	node := rc.Node()
-	client := genericjob.NewClient(rc)
 
 	ls := leaderState{
-		client:     client,
+		client:     w.client,
 		timersLock: timersLock,
 		timers:     timers,
 		id:         leaderID,
@@ -305,7 +268,7 @@ func (w *worker) OnBecomingRaftLeader(ctx context.Context, term uint64, leaderID
 		healthyDurationWithin: 10 * time.Second,
 	}
 
-	subscription, err := client.Subscribe(ctx)
+	subscription, err := w.client.Subscribe(ctx)
 	if err != nil {
 		return err
 	}
@@ -357,7 +320,7 @@ func (w *worker) OnBecomingRaftLeader(ctx context.Context, term uint64, leaderID
 					// TODO: use batch inside the raft to make it more efficient
 					// but it needed the allocation algorithm to be deterministic
 					// (eg. it will be the same accross all nodes)
-					_, err := client.Propose(ctx, genericjob.UpdateTaskExecution(taskExec))
+					_, err := w.client.Propose(ctx, genericjob.UpdateTaskExecution(taskExec))
 					if err != nil {
 						// determien error, maybe panic or maybe just fail
 						log.Printf("failed to (re)assign work: %v", err)
@@ -368,7 +331,7 @@ func (w *worker) OnBecomingRaftLeader(ctx context.Context, term uint64, leaderID
 				if notifyWorker {
 					log.Printf("leader: notifying workers that there is an update in task execution table")
 					// worker will be ready to take them from it's own DB
-					_, err := client.Propose(ctx, genericjob.NotifyTaskUpdated{})
+					_, err := w.client.Propose(ctx, genericjob.NotifyTaskUpdated{})
 					if err != nil {
 						log.Printf("failed to (re)assign work: %v", err)
 					}
@@ -411,13 +374,6 @@ func (w *worker) OnBecomingRaftLeader(ctx context.Context, term uint64, leaderID
 				case genericjob.EventWorkerRequestedWork:
 					// worker request a work
 
-					// update the "worker pool"
-					for idx, q := range evt.QueueIDs {
-						capacity := evt.Count[idx]
-						queue := ls.getNodeQueueState(evt.NodeID, q)
-						queue.Capacity = capacity
-					}
-
 				default:
 					// log.Printf("Unknown job evt")
 				}
@@ -438,190 +394,6 @@ func getTask(taskish any) *entity.Task {
 	case genericjob.EventTaskUpdated:
 		return (*entity.Task)(task)
 	}
-
-	return nil
-}
-
-type leaderState struct {
-	client     *genericjob.Client
-	timersLock *sync.RWMutex
-	timers     map[string]*time.Timer
-	id         uint64
-	term       uint64
-
-	node map[uint64]*entity.Node
-
-	// config
-	healthyDurationWithin time.Duration
-}
-
-func (ls *leaderState) cancelAllScheduledExecutions(ctx context.Context, task *entity.Task) error {
-	// TODO:
-	// maybe the cron definition changed, or manually cancelled (I don't want to run this tasks.)
-	// only if it's already in memory ofcourse
-	return nil
-}
-
-func (ls *leaderState) generateImmediateTaskExecutionInstances(ctx context.Context, task *entity.Task, serverTime time.Time, raftNode raft.Node) error {
-	healthyUIDs := map[uint64]struct{}{}
-	var healthyUID uint64
-
-	// only available in leader
-	for nodeID, progress := range raftNode.Status().Progress {
-		if progress.RecentActive {
-			healthyUIDs[nodeID] = struct{}{}
-			healthyUID = nodeID // TODO: for now just select the last
-		}
-	}
-
-	if len(healthyUIDs) == 0 {
-		return fmt.Errorf("leader: node not available")
-	}
-
-	state := &entity.TaskExecution{
-		Ns:             task.Ns,
-		Id:             uuid.NewString(),
-		TaskID:         task.Id,
-		QueueID:        task.QueueID,
-		ScheduledRunAt: time.Now(),
-		Status:         entity.ExecutionStatusPending,
-		PublishedAt:    serverTime,
-		Input:          task.Input,
-		UserTime:       task.UserTime,
-		State: &entity.TaskExecutionState{
-			AssignedNodeID: healthyUID, // assign executor node immediately
-		},
-	}
-
-	_, err := ls.client.Propose(ctx, genericjob.CreateTaskExecution(state))
-	if err != nil {
-		log.Printf("ERROR create task execution instance: %v\n", err)
-		return err
-	}
-
-	return nil
-}
-
-// schedule the task that is already in memory.
-// currentTime usually same as t0
-func (ls *leaderState) generateScheduledTaskExecutionInstances(ctx context.Context, task *entity.Task, serverTime time.Time) error {
-
-	// TODO SUPER: right now we implement the scheduled task first.
-	// need to switch case based on strategy later ~
-
-	if task == nil {
-		return fmt.Errorf("empty task definition")
-	}
-
-	if task.State != nil && task.State.LastGenerateEnd.After(serverTime.Add(-1*time.Minute)) { // arbitrary delta 1 minute
-		// no need to regenerate.
-		// just create the next trigger when to generate
-		err := ls.scheduleNextGenerate(ctx, time.Until(task.State.LastGenerateEnd), task)
-		if err != nil {
-			return err
-		}
-
-		return nil
-	}
-
-	// generate between last generate end, and server time's next one hour
-
-	serverTime = serverTime.Truncate(1 * time.Second)
-
-	t0 := serverTime
-	t1 := serverTime.AddDate(1, 0, 0) // GENERATE FOR FULL YEAR (PLANNED)
-
-	loc := task.UserTime.Location() // schedule relative to Task's location / time zone
-	schedule, err := crong.New(task.ExecutionStrategyInput.Scheduled.Cron, loc)
-	if err != nil {
-		return err
-	}
-
-	count := 0
-	execTimes := make([]time.Time, 0)
-
-	lastGeneratedEnd := t0
-
-	// generate for one full year.., but limited to max task only if it's exceed one hour (since we need to schedule soon)
-
-	for next := schedule.Next(t0); next.Before(t1) && (count < maxScheduledInstancePerTask || next.Before(t0.Add(1*time.Hour))); next = schedule.Next(next) {
-		execTimes = append(execTimes, next)
-		count++
-		execID := uuid.NewString()
-
-		status := entity.ExecutionStatusPending
-		if !next.After(serverTime) {
-			status = entity.ExecutionStatusMissed // missed execution, we can ask user how to handle this using different strategies
-		}
-
-		state := &entity.TaskExecution{
-			Ns:             task.Ns,
-			Id:             execID,
-			TaskID:         task.Id,
-			QueueID:        task.QueueID,
-			ScheduledRunAt: next,
-			Status:         status,
-			PublishedAt:    serverTime,
-			Input:          task.Input,
-			UserTime:       task.UserTime,
-		}
-
-		_, err := ls.client.Propose(ctx, genericjob.CreateTaskExecution(state))
-		if err != nil {
-			log.Printf("ERROR create task execution instance: %v\n", err)
-			continue
-		}
-
-		lastGeneratedEnd = t1
-	}
-
-	log.Printf("Scheduled %v task execution instance(s): %v. Updating the task.", count, execTimes)
-
-	// Update the task definition state
-	task.State = &entity.TaskState{
-		LastGenerateStart: t0,
-		LastGenerateEnd:   lastGeneratedEnd,
-	}
-
-	result, err := ls.client.Propose(ctx, genericjob.UpdateTask{
-		Task:       *task,
-		ServerTime: serverTime,
-	})
-	if err != nil {
-		log.Printf("ERROR update task %v", err)
-		return err
-	}
-
-	err = ls.scheduleNextGenerate(ctx, time.Until(t1), task)
-	if err != nil {
-		return err
-	}
-
-	log.Printf("Task scheduled: %+v", result)
-
-	return nil
-}
-
-func (ls *leaderState) scheduleNextGenerate(ctx context.Context, t time.Duration, task *entity.Task) error {
-	// Schedule for next generate trigger for this task
-	_ = time.AfterFunc(t, func() {
-		// to trigger the tick
-		_, err := ls.client.Propose(ctx, genericjob.RequestRegenerateTaskInstances{RefIDs: task.RefIDs(), ID: task.ID()})
-		if err != nil {
-			log.Printf("Error scheduling next generate time")
-			return
-		}
-	})
-
-	return nil
-}
-
-func SampleTask(ctx context.Context, execID, taskId string) error {
-	if ctx.Err() != nil {
-		return ctx.Err()
-	}
-
-	log.Printf(". \"%v\" (%v) is now running!", execID, taskId)
 
 	return nil
 }

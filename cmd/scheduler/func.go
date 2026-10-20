@@ -1,4 +1,4 @@
-package genericjob
+package main
 
 import (
 	"log"

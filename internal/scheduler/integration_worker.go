@@ -21,7 +21,7 @@ type worker struct {
 
 	namespace string
 
-	taskDefinitionStoreRO *mycontent_base.Handler[*entity.Task]
+	taskDefinitionStoreRO *mycontent_base.Handler[*entity.RecurringTask]
 	taskExecutionStoreRO  *mycontent_base.Handler[*entity.TaskExecution]
 
 	// task IDs
@@ -41,7 +41,7 @@ func NewWorker(
 	namespace string,
 	topic notifier.Topic,
 	client *scheduler.Client,
-	taskDefinitionStoreRO *mycontent_base.Handler[*entity.Task],
+	taskDefinitionStoreRO *mycontent_base.Handler[*entity.RecurringTask],
 	taskExecutionStoreRO *mycontent_base.Handler[*entity.TaskExecution],
 	queue map[string]chan *entity.TaskExecution,
 ) *worker {
@@ -53,7 +53,8 @@ func NewWorker(
 		namespace:             namespace,
 		scheduled:             map[queueTaskPair]struct{}{},
 		scheduledLock:         &sync.Mutex{},
-		queue:                 make(map[string]chan *entity.TaskExecution),
+		queue:                 queue,
+		client:                client,
 	}
 }
 
@@ -82,13 +83,13 @@ func (w *worker) Run(ctx context.Context) error {
 				return
 			case msg := <-subscription.Listen():
 				switch evt := msg.(type) {
-				case scheduler.EventTaskExecutionUpdated:
+				case scheduler.EventTaskExecutionAssignmentUpdated:
 					// If there is an adjustment in the assignment, we do work here
-					log.Println("worker: got task execution updated event")
+					log.Println("worker: got task execution assignment updated event")
 					w.scheduleWork(ctx)
 				case scheduler.EventTaskExecutionCreated:
 					// TODO: refactor2
-					if evt.State == nil || evt.State.AssignedNodeID != w.client.ID() {
+					if evt.AssignmentState == nil || evt.AssignmentState.AssignedTo != w.client.ID() {
 						continue
 					}
 
@@ -148,12 +149,12 @@ func (w *worker) scheduleWork(ctx context.Context) {
 				continue
 			}
 
-			if taskExec.State == nil {
+			if taskExec.AssignmentState == nil {
 				// this task should not be run, since not yet assigned by leader
 				continue
 			}
 
-			if taskExec.State.AssignedNodeID != w.client.ID() {
+			if taskExec.AssignmentState.AssignedTo != w.client.ID() {
 				// don't schedule other people task :)
 				continue
 			}
@@ -173,7 +174,7 @@ func (w *worker) scheduleWork(ctx context.Context) {
 
 			newCount++
 
-			tq := timeQueue{taskExec.ScheduledRunAt, taskExec.QueueID, taskExec.State.AssignedNodeID}
+			tq := timeQueue{taskExec.ScheduledRunAt, taskExec.QueueID, taskExec.AssignmentState.AssignedTo}
 			if _, ok := tgs[tq]; !ok {
 				tgs[tq] = make([]*entity.TaskExecution, 0)
 			}
@@ -261,7 +262,8 @@ func (w *worker) OnBecomingRaftLeader(ctx context.Context, term uint64, leaderID
 		return err
 	}
 
-	ls := leaderState{
+	ls := leader{
+		worker:     w,
 		client:     w.client,
 		timersLock: timersLock,
 		timers:     timers,
@@ -286,12 +288,12 @@ func (w *worker) OnBecomingRaftLeader(ctx context.Context, term uint64, leaderID
 }
 
 // utility to retrieve task from task-ish alias
-func getTask(taskish any) *entity.Task {
+func getTask(taskish any) *entity.RecurringTask {
 	switch task := taskish.(type) {
-	case scheduler.EventTaskCreated:
-		return (*entity.Task)(task)
-	case scheduler.EventTaskUpdated:
-		return (*entity.Task)(task)
+	case scheduler.EventRecurringTaskCreated:
+		return (*entity.RecurringTask)(task)
+	case scheduler.EventRecurringTaskUpdated:
+		return (*entity.RecurringTask)(task)
 	}
 
 	return nil

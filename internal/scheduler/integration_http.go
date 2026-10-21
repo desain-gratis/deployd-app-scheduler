@@ -35,7 +35,7 @@ func (h *httpAPI) CreateTask(w http.ResponseWriter, r *http.Request, p httproute
 		return
 	}
 
-	var taskDefinition entity.Task
+	var taskDefinition entity.RecurringTask
 	err = json.Unmarshal(payload, &taskDefinition)
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
@@ -46,7 +46,7 @@ func (h *httpAPI) CreateTask(w http.ResponseWriter, r *http.Request, p httproute
 	taskDefinition.Id = uuid.NewString()
 
 	// server do something
-	data := scheduler.CreateTask{
+	data := scheduler.CreateRecurringTask{
 		Task:       taskDefinition,
 		ServerTime: time.Now(),
 	}

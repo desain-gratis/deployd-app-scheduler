@@ -68,7 +68,7 @@ func enableSchedulerModule(ctx context.Context, router *httprouter.Router) {
 		log.Fatal().Msgf("err running raft: %v", err)
 	}
 
-	taskUsecase := schedulerApp.GetTaskStore()
+	recurringTaskUsecase := schedulerApp.GetRecurringTaskStore()
 	taskExecutionUsecase := schedulerApp.GetTaskExecutionStore()
 
 	schedulerClient := scheduler.NewClient(schedulerRaft)
@@ -79,7 +79,7 @@ func enableSchedulerModule(ctx context.Context, router *httprouter.Router) {
 		"echoReverse()": scheduler_integration.NewPooledQueue(ctx, schedulerClient, 30, echoReverse),
 	}
 
-	worker := scheduler_integration.NewWorker(namespace, topic, schedulerClient, taskUsecase, taskExecutionUsecase, queue)
+	worker := scheduler_integration.NewWorker(namespace, topic, schedulerClient, recurringTaskUsecase, taskExecutionUsecase, queue)
 	httpAPI := scheduler_integration.NewHttpAPI(topic, schedulerClient)
 
 	err = schedulerRaft.Run(ctx, worker.OnBecomingRaftLeader)
@@ -92,12 +92,12 @@ func enableSchedulerModule(ctx context.Context, router *httprouter.Router) {
 		log.Fatal().Msgf("err running integration: %v", err)
 	}
 
-	taskHandler := mycontentapi.New(taskUsecase, publicBaseURL+"/task", nil)
+	recurringTaskHandler := mycontentapi.New(recurringTaskUsecase, publicBaseURL+"/task", nil)
 	taskExecutionHandler := mycontentapi.New(taskExecutionUsecase, publicBaseURL+"/task/instance", []string{"queue_id"})
 
 	router.GET("/hello", httpAPI.Hello)
 	router.POST("/schedule", httpAPI.CreateTask)
 
-	router.GET("/task", taskHandler.Get)
+	router.GET("/task", recurringTaskHandler.Get)
 	router.GET("/task/instance", taskExecutionHandler.Get)
 }

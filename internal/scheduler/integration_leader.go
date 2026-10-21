@@ -16,7 +16,7 @@ import (
 	"github.com/desain-gratis/deployd-app-scheduler/src/entity"
 )
 
-type leaderState struct {
+type leader struct {
 	*worker
 	client     *scheduler.Client
 	timersLock *sync.RWMutex
@@ -35,76 +35,18 @@ type leaderState struct {
 }
 
 // Main loop for leader
-func (ls *leaderState) Handler(ctx context.Context, term, leaderID uint64) {
+func (ls *leader) Handler(ctx context.Context, term, leaderID uint64) {
 	for {
 		select {
 		// Check unhealthy, if so rebalance Recurring / pending tasks
 		case <-ls.ticker.C:
-			healthyUIDs := map[uint64]struct{}{}
-			var healthyUID uint64
-
-			// only available in leader
-			for nodeID, progress := range ls.raftNode.Status().Progress {
-				if progress.RecentActive {
-					healthyUIDs[nodeID] = struct{}{}
-					healthyUID = nodeID // TODO: for now just select the last
-				}
-			}
-
-			if len(healthyUIDs) == 0 {
-				log.Printf("leader: danger! no healthy node")
-				continue
-			}
-
-			log.Printf("leader: healthy uids %v", healthyUIDs)
-
-			taskExecs, err := ls.worker.taskExecutionStoreRO.Stream(ctx, "deployd", nil, "")
-			if err != nil {
-				log.Printf("leader: failed to read task execution store %v", err)
-				continue
-			}
-
-			var notifyWorker bool
-
-			for taskExec := range taskExecs {
-				if taskExec.State != nil {
-					if _, ok := healthyUIDs[taskExec.State.AssignedNodeID]; ok {
-						continue
-					}
-					// notice we don't do "upscale" if healthy node increase :)
-					// maybe manual rebalance later :)
-				}
-
-				taskExec.State = &entity.TaskExecutionState{
-					AssignedNodeID: healthyUID,
-				}
-
-				// TODO: use batch inside the raft to make it more efficient
-				// but it needed the allocation algorithm to be deterministic
-				// (eg. it will be the same accross all nodes)
-				_, err := ls.client.Propose(ctx, scheduler.UpdateTaskExecution(taskExec))
-				if err != nil {
-					// determien error, maybe panic or maybe just fail
-					log.Printf("failed to (re)assign work: %v", err)
-				}
-				notifyWorker = true
-			}
-
-			if notifyWorker {
-				log.Printf("leader: notifying workers that there is an update in task execution table")
-				// worker will be ready to take them from it's own DB
-				_, err := ls.client.Propose(ctx, scheduler.NotifyTaskUpdated{})
-				if err != nil {
-					log.Printf("failed to (re)assign work: %v", err)
-				}
-			} else {
-				log.Printf("leader: all good in the scheduler world")
-			}
+			// check tasks that has empty assignment / unhealthy node
+			ls.checkTaskExecutionAssignment(ctx)
 		case msg := <-ls.subscription.Listen():
 			t := time.Now()
 
 			switch evt := msg.(type) {
-			case scheduler.EventTaskCreated, scheduler.EventTaskNeedRegenerate:
+			case scheduler.EventRecurringTaskCreated, scheduler.EventRecurringTaskNeedRegenerate:
 				log.Printf("leader: a new task definition has come. I better schedule! %+v", evt)
 				task := getTask(evt)
 				if task == nil {
@@ -112,29 +54,11 @@ func (ls *leaderState) Handler(ctx context.Context, term, leaderID uint64) {
 					continue
 				}
 
-				switch task.ExecutionStrategy {
-				case entity.ExecutionStrategyImmediate:
-					err := ls.generateImmediateTaskExecutionInstances(ctx, task, t)
-					if err != nil {
-						log.Printf("leader: err creating immediate task execution instances %v", err)
-						continue
-					}
-
-				case entity.ExecutionStrategyScheduled:
-					err := ls.generateScheduledTaskExecutionInstances(ctx, task, t)
-					if err != nil {
-						log.Printf("leader: err creating scheduled task execution instances %v", err)
-						continue
-					}
-				default:
-					log.Printf("[warn] unsupported execution strategy: %v", task.ExecutionStrategy)
+				err := ls.generateInstances(ctx, task, t)
+				if err != nil {
+					log.Printf("leader: err creating scheduled task execution instances %v", err)
+					continue
 				}
-
-			case scheduler.EventTaskUpdated:
-				// task updated! we don't do anything.
-
-			case scheduler.EventWorkerRequestedWork:
-				// worker request a work
 
 			default:
 				// log.Printf("Unknown job evt")
@@ -145,14 +69,8 @@ func (ls *leaderState) Handler(ctx context.Context, term, leaderID uint64) {
 	}
 }
 
-func (ls *leaderState) cancelAllScheduledExecutions(ctx context.Context, task *entity.Task) error {
-	// TODO:
-	// maybe the cron definition changed, or manually cancelled (I don't want to run this tasks.)
-	// only if it's already in memory ofcourse
-	return nil
-}
-
-func (ls *leaderState) generateImmediateTaskExecutionInstances(ctx context.Context, task *entity.Task, serverTime time.Time) error {
+// check for unhealthy and if found, re-assign task execution, notify worker
+func (ls *leader) checkTaskExecutionAssignment(ctx context.Context) error {
 	healthyUIDs := map[uint64]struct{}{}
 	var healthyUID uint64
 
@@ -165,28 +83,53 @@ func (ls *leaderState) generateImmediateTaskExecutionInstances(ctx context.Conte
 	}
 
 	if len(healthyUIDs) == 0 {
-		return fmt.Errorf("leader: node not available")
+		return fmt.Errorf("leader: no healthy node")
 	}
 
-	state := &entity.TaskExecution{
-		Ns:             task.Ns,
-		Id:             uuid.NewString(),
-		TaskID:         task.Id,
-		QueueID:        task.QueueID,
-		ScheduledRunAt: time.Now(),
-		Status:         entity.ExecutionStatusPending,
-		PublishedAt:    serverTime,
-		Input:          task.Input,
-		UserTime:       task.UserTime,
-		State: &entity.TaskExecutionState{
-			AssignedNodeID: healthyUID, // assign executor node immediately
-		},
-	}
+	log.Printf("leader: healthy uids %v", healthyUIDs)
 
-	_, err := ls.client.Propose(ctx, scheduler.CreateTaskExecution(state))
+	taskExecs, err := ls.worker.taskExecutionStoreRO.Stream(ctx, "deployd", nil, "")
 	if err != nil {
-		log.Printf("ERROR create task execution instance: %v\n", err)
 		return err
+	}
+
+	var notifyWorker bool
+
+	for taskExec := range taskExecs {
+		if taskExec.AssignmentState != nil {
+			if _, ok := healthyUIDs[taskExec.AssignmentState.AssignedTo]; ok {
+				continue
+			}
+			// notice we don't do "upscale" if healthy node increase :)
+			// maybe manual rebalance later :)
+		} else {
+			taskExec.AssignmentState = &entity.AssignmentState{}
+		}
+
+		taskExec.AssignmentState.AssignedTo = healthyUID
+		taskExec.AssignmentState.AssignedBy = ls.client.ID()
+		taskExec.AssignmentState.AssignmentTime = time.Now()
+		taskExec.AssignmentState.AssignmentCount++
+
+		// TODO: use batch inside the raft to make it more efficient
+		// but it needed the allocation algorithm to be deterministic
+		// (eg. it will be the same accross all nodes)
+		_, err := ls.client.Propose(ctx, scheduler.UpdateTaskExecution(taskExec))
+		if err != nil {
+			// determien error, maybe panic or maybe just fail
+			log.Printf("failed to (re)assign work: %v", err)
+		}
+		notifyWorker = true
+	}
+
+	if notifyWorker {
+		log.Printf("leader: notifying workers that there is an update in task execution table")
+		_, err := ls.client.Propose(ctx, scheduler.NotifyTaskExecutionAssignmentUpdated{})
+		if err != nil {
+			log.Printf("failed to (re)assign work: %v", err)
+		}
+	} else {
+		log.Printf("leader: all good in the scheduler world")
 	}
 
 	return nil
@@ -194,7 +137,7 @@ func (ls *leaderState) generateImmediateTaskExecutionInstances(ctx context.Conte
 
 // schedule the task that is already in memory.
 // currentTime usually same as t0
-func (ls *leaderState) generateScheduledTaskExecutionInstances(ctx context.Context, task *entity.Task, serverTime time.Time) error {
+func (ls *leader) generateInstances(ctx context.Context, task *entity.RecurringTask, serverTime time.Time) error {
 
 	// TODO SUPER: right now we implement the scheduled task first.
 	// need to switch case based on strategy later ~
@@ -222,7 +165,7 @@ func (ls *leaderState) generateScheduledTaskExecutionInstances(ctx context.Conte
 	t1 := serverTime.AddDate(1, 0, 0) // GENERATE FOR FULL YEAR (PLANNED)
 
 	loc := task.UserTime.Location() // schedule relative to Task's location / time zone
-	schedule, err := crong.New(task.ExecutionStrategyInput.Scheduled.Cron, loc)
+	schedule, err := crong.New(task.Cron, loc)
 	if err != nil {
 		return err
 	}
@@ -268,12 +211,12 @@ func (ls *leaderState) generateScheduledTaskExecutionInstances(ctx context.Conte
 	log.Printf("Scheduled %v task execution instance(s): %v. Updating the task.", count, execTimes)
 
 	// Update the task definition state
-	task.State = &entity.TaskState{
+	task.State = &entity.RecurringTaskState{
 		LastGenerateStart: t0,
 		LastGenerateEnd:   lastGeneratedEnd,
 	}
 
-	result, err := ls.client.Propose(ctx, scheduler.UpdateTask{
+	result, err := ls.client.Propose(ctx, scheduler.UpdateRecurringTask{
 		Task:       *task,
 		ServerTime: serverTime,
 	})
@@ -292,7 +235,7 @@ func (ls *leaderState) generateScheduledTaskExecutionInstances(ctx context.Conte
 	return nil
 }
 
-func (ls *leaderState) scheduleNextGenerate(ctx context.Context, t time.Duration, task *entity.Task) error {
+func (ls *leader) scheduleNextGenerate(ctx context.Context, t time.Duration, task *entity.RecurringTask) error {
 	// Schedule for next generate trigger for this task
 	_ = time.AfterFunc(t, func() {
 		// to trigger the tick

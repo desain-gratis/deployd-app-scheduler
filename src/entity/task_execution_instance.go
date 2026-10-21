@@ -26,14 +26,17 @@ type TaskExecution struct {
 	Input  any `json:"input,omitempty"`
 	Output any `json:"output,omitempty"`
 
-	State *TaskExecutionState `json:"state"`
+	AssignmentState *AssignmentState `json:"assignment_state"`
 
 	PublishedAt time.Time `json:"published_at"`
 	URLx        string    `json:"url"`
 }
 
-type TaskExecutionState struct {
-	AssignedNodeID uint64 `json:"assigned_node_id"` // Who to execute this task, as assigned by the Leader
+type AssignmentState struct {
+	AssignedTo      uint64    `json:"assigned_to"` // Who to execute this task, as assigned by the Leader
+	AssignedBy      uint64    `json:"assigned_by"`
+	AssignmentTime  time.Time `json:"assignment_time"`
+	AssignmentCount int       `json:"assignment_count"`
 }
 
 type ExecutionStatus string

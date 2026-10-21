@@ -8,23 +8,141 @@ import (
 	"time"
 
 	"github.com/arcward/crong"
-	"github.com/desain-gratis/deployd-app-scheduler/internal/raft-app/scheduler"
-	"github.com/desain-gratis/deployd-app-scheduler/src/entity"
+	"github.com/desain-gratis/common/lib/notifier"
 	"github.com/google/uuid"
 	"go.etcd.io/raft/v3"
+
+	"github.com/desain-gratis/deployd-app-scheduler/internal/raft-app/scheduler"
+	"github.com/desain-gratis/deployd-app-scheduler/src/entity"
 )
 
 type leaderState struct {
+	*worker
 	client     *scheduler.Client
 	timersLock *sync.RWMutex
 	timers     map[string]*time.Timer
 	id         uint64
 	term       uint64
 
-	node map[uint64]*entity.Node
+	node   map[uint64]*entity.Node
+	ticker *time.Ticker
 
 	// config
 	healthyDurationWithin time.Duration
+
+	raftNode     raft.Node
+	subscription notifier.Subscription
+}
+
+// Main loop for leader
+func (ls *leaderState) Handler(ctx context.Context, term, leaderID uint64) {
+	for {
+		select {
+		// Check unhealthy, if so rebalance Recurring / pending tasks
+		case <-ls.ticker.C:
+			healthyUIDs := map[uint64]struct{}{}
+			var healthyUID uint64
+
+			// only available in leader
+			for nodeID, progress := range ls.raftNode.Status().Progress {
+				if progress.RecentActive {
+					healthyUIDs[nodeID] = struct{}{}
+					healthyUID = nodeID // TODO: for now just select the last
+				}
+			}
+
+			if len(healthyUIDs) == 0 {
+				log.Printf("leader: danger! no healthy node")
+				continue
+			}
+
+			log.Printf("leader: healthy uids %v", healthyUIDs)
+
+			taskExecs, err := ls.worker.taskExecutionStoreRO.Stream(ctx, "deployd", nil, "")
+			if err != nil {
+				log.Printf("leader: failed to read task execution store %v", err)
+				continue
+			}
+
+			var notifyWorker bool
+
+			for taskExec := range taskExecs {
+				if taskExec.State != nil {
+					if _, ok := healthyUIDs[taskExec.State.AssignedNodeID]; ok {
+						continue
+					}
+					// notice we don't do "upscale" if healthy node increase :)
+					// maybe manual rebalance later :)
+				}
+
+				taskExec.State = &entity.TaskExecutionState{
+					AssignedNodeID: healthyUID,
+				}
+
+				// TODO: use batch inside the raft to make it more efficient
+				// but it needed the allocation algorithm to be deterministic
+				// (eg. it will be the same accross all nodes)
+				_, err := ls.client.Propose(ctx, scheduler.UpdateTaskExecution(taskExec))
+				if err != nil {
+					// determien error, maybe panic or maybe just fail
+					log.Printf("failed to (re)assign work: %v", err)
+				}
+				notifyWorker = true
+			}
+
+			if notifyWorker {
+				log.Printf("leader: notifying workers that there is an update in task execution table")
+				// worker will be ready to take them from it's own DB
+				_, err := ls.client.Propose(ctx, scheduler.NotifyTaskUpdated{})
+				if err != nil {
+					log.Printf("failed to (re)assign work: %v", err)
+				}
+			} else {
+				log.Printf("leader: all good in the scheduler world")
+			}
+		case msg := <-ls.subscription.Listen():
+			t := time.Now()
+
+			switch evt := msg.(type) {
+			case scheduler.EventTaskCreated, scheduler.EventTaskNeedRegenerate:
+				log.Printf("leader: a new task definition has come. I better schedule! %+v", evt)
+				task := getTask(evt)
+				if task == nil {
+					// TODO: error inside the raft app, can check which causes empty event
+					continue
+				}
+
+				switch task.ExecutionStrategy {
+				case entity.ExecutionStrategyImmediate:
+					err := ls.generateImmediateTaskExecutionInstances(ctx, task, t)
+					if err != nil {
+						log.Printf("leader: err creating immediate task execution instances %v", err)
+						continue
+					}
+
+				case entity.ExecutionStrategyScheduled:
+					err := ls.generateScheduledTaskExecutionInstances(ctx, task, t)
+					if err != nil {
+						log.Printf("leader: err creating scheduled task execution instances %v", err)
+						continue
+					}
+				default:
+					log.Printf("[warn] unsupported execution strategy: %v", task.ExecutionStrategy)
+				}
+
+			case scheduler.EventTaskUpdated:
+				// task updated! we don't do anything.
+
+			case scheduler.EventWorkerRequestedWork:
+				// worker request a work
+
+			default:
+				// log.Printf("Unknown job evt")
+			}
+		case <-ctx.Done():
+			return
+		}
+	}
 }
 
 func (ls *leaderState) cancelAllScheduledExecutions(ctx context.Context, task *entity.Task) error {
@@ -34,12 +152,12 @@ func (ls *leaderState) cancelAllScheduledExecutions(ctx context.Context, task *e
 	return nil
 }
 
-func (ls *leaderState) generateImmediateTaskExecutionInstances(ctx context.Context, task *entity.Task, serverTime time.Time, raftNode raft.Node) error {
+func (ls *leaderState) generateImmediateTaskExecutionInstances(ctx context.Context, task *entity.Task, serverTime time.Time) error {
 	healthyUIDs := map[uint64]struct{}{}
 	var healthyUID uint64
 
 	// only available in leader
-	for nodeID, progress := range raftNode.Status().Progress {
+	for nodeID, progress := range ls.raftNode.Status().Progress {
 		if progress.RecentActive {
 			healthyUIDs[nodeID] = struct{}{}
 			healthyUID = nodeID // TODO: for now just select the last

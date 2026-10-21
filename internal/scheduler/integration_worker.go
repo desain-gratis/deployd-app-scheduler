@@ -256,6 +256,11 @@ func (w *worker) OnBecomingRaftLeader(ctx context.Context, term uint64, leaderID
 	// Load all task definition from store
 	node := rc.Node()
 
+	subscription, err := w.client.Subscribe(ctx)
+	if err != nil {
+		return err
+	}
+
 	ls := leaderState{
 		client:     w.client,
 		timersLock: timersLock,
@@ -266,121 +271,15 @@ func (w *worker) OnBecomingRaftLeader(ctx context.Context, term uint64, leaderID
 		// keep track of node health
 		node:                  make(map[uint64]*entity.Node),
 		healthyDurationWithin: 10 * time.Second,
-	}
 
-	subscription, err := w.client.Subscribe(ctx)
-	if err != nil {
-		return err
+		ticker:       ticker,
+		raftNode:     node,
+		subscription: subscription,
 	}
 
 	go func(term, leaderID uint64) {
 		defer ticker.Stop()
-		for {
-			select {
-			case <-ticker.C:
-				healthyUIDs := map[uint64]struct{}{}
-				var healthyUID uint64
-
-				// only available in leader
-				for nodeID, progress := range node.Status().Progress {
-					if progress.RecentActive {
-						healthyUIDs[nodeID] = struct{}{}
-						healthyUID = nodeID // TODO: for now just select the last
-					}
-				}
-
-				if len(healthyUIDs) == 0 {
-					log.Printf("leader: danger! no healthy node")
-					continue
-				}
-
-				log.Printf("leader: healthy uids %v", healthyUIDs)
-
-				taskExecs, err := w.taskExecutionStoreRO.Stream(ctx, "deployd", nil, "")
-				if err != nil {
-					log.Printf("leader: failed to read task execution store %v", err)
-					continue
-				}
-
-				var notifyWorker bool
-
-				for taskExec := range taskExecs {
-					if taskExec.State != nil {
-						if _, ok := healthyUIDs[taskExec.State.AssignedNodeID]; ok {
-							continue
-						}
-						// notice we don't do "upscale" if healthy node increase :)
-						// maybe manual rebalance later :)
-					}
-
-					taskExec.State = &entity.TaskExecutionState{
-						AssignedNodeID: healthyUID,
-					}
-
-					// TODO: use batch inside the raft to make it more efficient
-					// but it needed the allocation algorithm to be deterministic
-					// (eg. it will be the same accross all nodes)
-					_, err := w.client.Propose(ctx, scheduler.UpdateTaskExecution(taskExec))
-					if err != nil {
-						// determien error, maybe panic or maybe just fail
-						log.Printf("failed to (re)assign work: %v", err)
-					}
-					notifyWorker = true
-				}
-
-				if notifyWorker {
-					log.Printf("leader: notifying workers that there is an update in task execution table")
-					// worker will be ready to take them from it's own DB
-					_, err := w.client.Propose(ctx, scheduler.NotifyTaskUpdated{})
-					if err != nil {
-						log.Printf("failed to (re)assign work: %v", err)
-					}
-				} else {
-					log.Printf("leader: all good in the scheduler world")
-				}
-			case msg := <-subscription.Listen():
-				t := time.Now()
-
-				switch evt := msg.(type) {
-				case scheduler.EventTaskCreated, scheduler.EventTaskNeedRegenerate:
-					log.Printf("leader: a new task definition has come. I better schedule! %+v", evt)
-					task := getTask(evt)
-					if task == nil {
-						// TODO: error inside the raft app, can check which causes empty event
-						continue
-					}
-
-					switch task.ExecutionStrategy {
-					case entity.ExecutionStrategyImmediate:
-						err := ls.generateImmediateTaskExecutionInstances(ctx, task, t, node)
-						if err != nil {
-							log.Printf("leader: err creating immediate task execution instances %v", err)
-							continue
-						}
-
-					case entity.ExecutionStrategyScheduled:
-						err := ls.generateScheduledTaskExecutionInstances(ctx, task, t)
-						if err != nil {
-							log.Printf("leader: err creating scheduled task execution instances %v", err)
-							continue
-						}
-					default:
-						log.Printf("[warn] unsupported execution strategy: %v", task.ExecutionStrategy)
-					}
-
-				case scheduler.EventTaskUpdated:
-					// task updated! we don't do anything.
-
-				case scheduler.EventWorkerRequestedWork:
-					// worker request a work
-
-				default:
-					// log.Printf("Unknown job evt")
-				}
-			case <-ctx.Done():
-				return
-			}
-		}
+		ls.Handler(ctx, term, leaderID)
 	}(term, leaderID)
 
 	return nil

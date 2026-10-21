@@ -26,7 +26,7 @@ type TaskExecution struct {
 	Input  any `json:"input,omitempty"`
 	Output any `json:"output,omitempty"`
 
-	AssignmentState *AssignmentState `json:"assignment_state"`
+	AssignmentStatus *AssignmentState `json:"assignment_status"`
 
 	PublishedAt time.Time `json:"published_at"`
 	URLx        string    `json:"url"`

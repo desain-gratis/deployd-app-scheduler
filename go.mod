@@ -2,7 +2,7 @@ module github.com/desain-gratis/deployd-app-scheduler
 
 go 1.26.0
 
-// replace github.com/desain-gratis/common => ../common
+replace github.com/desain-gratis/common => ../common
 
 require (
 	github.com/arcward/crong v0.0.0-20240827163849-4abe2a5262db
@@ -11,6 +11,7 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/julienschmidt/httprouter v1.3.0
 	github.com/rs/zerolog v1.34.0
+	go.etcd.io/raft/v3 v3.7.0
 )
 
 require (
@@ -60,7 +61,6 @@ require (
 	go.etcd.io/etcd/client/pkg/v3 v3.7.1 // indirect
 	go.etcd.io/etcd/pkg/v3 v3.7.1 // indirect
 	go.etcd.io/etcd/server/v3 v3.7.1 // indirect
-	go.etcd.io/raft/v3 v3.7.0 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
 	go.opentelemetry.io/otel v1.43.0 // indirect
 	go.opentelemetry.io/otel/metric v1.43.0 // indirect

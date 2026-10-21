@@ -61,7 +61,8 @@ func enableSchedulerModule(ctx context.Context, router *httprouter.Router) {
 	topic := notifier_impl.NewStandardTopic()
 
 	namespace := "deployd"
-	schedulerApp := scheduler.New(namespace, topic, db)
+	assignmentUpdated := make(chan *entity.TaskExecution) // to sync schedule
+	schedulerApp := scheduler.New(namespace, topic, db, assignmentUpdated)
 
 	schedulerRaft, _, err := runneretcd.RunWithConfig(ctx, os.Getenv("DEPLOYD_RAFT"), "scheduler", schedulerApp)
 	if err != nil {
@@ -74,12 +75,12 @@ func enableSchedulerModule(ctx context.Context, router *httprouter.Router) {
 	schedulerClient := scheduler.NewClient(schedulerRaft)
 
 	// List of functions to be executed inside scheduler
-	queue := map[string]chan *entity.TaskExecution{
+	queue := map[string]chan *scheduler_integration.TaskExecutionRuntime{
 		"sendInvoice()": scheduler_integration.NewPooledQueue(ctx, schedulerClient, 30, sendInvoice),
 		"echoReverse()": scheduler_integration.NewPooledQueue(ctx, schedulerClient, 30, echoReverse),
 	}
 
-	worker := scheduler_integration.NewWorker(namespace, topic, schedulerClient, recurringTaskUsecase, taskExecutionUsecase, queue)
+	worker := scheduler_integration.NewWorker(namespace, topic, schedulerClient, recurringTaskUsecase, taskExecutionUsecase, queue, assignmentUpdated)
 	httpAPI := scheduler_integration.NewHttpAPI(topic, schedulerClient)
 
 	err = schedulerRaft.Run(ctx, worker.OnBecomingRaftLeader)

@@ -9,11 +9,11 @@ import (
 	"github.com/desain-gratis/deployd-app-scheduler/src/entity"
 )
 
-type TaskHandler func(task *entity.TaskExecution) error
+type TaskHandler func(task *TaskExecutionRuntime) error
 
-func NewPooledQueue(ctx context.Context, client *genericjob.Client, count int, fn TaskHandler) chan *entity.TaskExecution {
+func NewPooledQueue(ctx context.Context, client *genericjob.Client, count int, fn TaskHandler) chan *TaskExecutionRuntime {
 	// simple workers
-	queue := make(chan *entity.TaskExecution)
+	queue := make(chan *TaskExecutionRuntime)
 
 	go func() {
 		defer close(queue)
@@ -31,7 +31,7 @@ func NewPooledQueue(ctx context.Context, client *genericjob.Client, count int, f
 				taskExec.Status = entity.ExecutionStatusInProgress
 
 				// update before
-				_, err := client.Propose(ctx, genericjob.UpdateTaskExecution(taskExec))
+				_, err := client.Propose(ctx, genericjob.UpdateTaskExecution(taskExec.TaskExecution))
 				if err != nil {
 					log.Printf("ERROR failed to update task execution instance: %v\n", err)
 					return
@@ -50,7 +50,7 @@ func NewPooledQueue(ctx context.Context, client *genericjob.Client, count int, f
 				taskExec.CompletedAt = &tComplete
 
 				// update after
-				_, err = client.Propose(ctx, genericjob.UpdateTaskExecution(taskExec))
+				_, err = client.Propose(ctx, genericjob.UpdateTaskExecution(taskExec.TaskExecution))
 				if err != nil {
 					// failed to inform cluster back. Leader's timeout mechanism will kick in.
 					log.Printf("ERROR failed to update task execution instance: %v\n", err)

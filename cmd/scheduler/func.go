@@ -4,10 +4,10 @@ import (
 	"log"
 	"time"
 
-	"github.com/desain-gratis/deployd-app-scheduler/src/entity"
+	scheduler_integration "github.com/desain-gratis/deployd-app-scheduler/internal/scheduler"
 )
 
-func sendInvoice(taskExec *entity.TaskExecution) error {
+func sendInvoice(taskExec *scheduler_integration.TaskExecutionRuntime) error {
 	log.Printf("The task sendInvoice(): %v triggered! Scheduled run at %v with input: %v !", taskExec.Id, taskExec.ScheduledRunAt.Truncate(1*time.Second), taskExec.Input)
 
 	taskExec.Output = "BERHAZIL"
@@ -15,7 +15,7 @@ func sendInvoice(taskExec *entity.TaskExecution) error {
 	return nil
 }
 
-func echoReverse(taskExec *entity.TaskExecution) error {
+func echoReverse(taskExec *scheduler_integration.TaskExecutionRuntime) error {
 	b, ok := taskExec.Input.(string)
 	if !ok {
 		taskExec.Output = "Not a byte"

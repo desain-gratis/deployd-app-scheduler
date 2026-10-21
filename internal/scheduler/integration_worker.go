@@ -25,11 +25,15 @@ type worker struct {
 	taskExecutionStoreRO  *mycontent_base.Handler[*entity.TaskExecution]
 
 	// task IDs
-	scheduled     map[queueTaskPair]struct{}
+	scheduled     map[queueTaskPair]*TaskExecutionRuntime
 	scheduledLock *sync.Mutex
 
-	queue  map[string]chan *entity.TaskExecution
+	queue  map[string]chan *TaskExecutionRuntime
 	client *scheduler.Client
+
+	timeBucket        map[timeQueue][]*TaskExecutionRuntime
+	timeBucketLock    *sync.Mutex
+	assignmentUpdated chan *entity.TaskExecution
 }
 type queueTaskPair struct {
 	queueID string
@@ -43,7 +47,8 @@ func NewWorker(
 	client *scheduler.Client,
 	taskDefinitionStoreRO *mycontent_base.Handler[*entity.RecurringTask],
 	taskExecutionStoreRO *mycontent_base.Handler[*entity.TaskExecution],
-	queue map[string]chan *entity.TaskExecution,
+	queue map[string]chan *TaskExecutionRuntime,
+	assignmentUpdated chan *entity.TaskExecution,
 ) *worker {
 	return &worker{
 		topic:                 topic,
@@ -51,62 +56,40 @@ func NewWorker(
 		taskDefinitionStoreRO: taskDefinitionStoreRO,
 		taskExecutionStoreRO:  taskExecutionStoreRO,
 		namespace:             namespace,
-		scheduled:             map[queueTaskPair]struct{}{},
+		scheduled:             make(map[queueTaskPair]*TaskExecutionRuntime),
 		scheduledLock:         &sync.Mutex{},
 		queue:                 queue,
 		client:                client,
+		timeBucket:            make(map[timeQueue][]*TaskExecutionRuntime),
+		assignmentUpdated:     assignmentUpdated,
+		timeBucketLock:        &sync.Mutex{},
 	}
 }
 
 func (w *worker) Run(ctx context.Context) error {
-	// TODO: have "workerState" per queue; (eg how much they can take more work, or should stop UpdateAvailability etc..)
-
-	// each queue have their "request work" loop;
-	// we can add back-off / backpressure logic here later~
-	// right now, we're just using simple ticker, and it will always ask for more work
-
-	// Guarantees that we can get the latest state, and all incoming message after that
-	subscription, err := w.client.Subscribe(ctx)
+	allTask, err := w.taskExecutionStoreRO.Get(ctx, w.namespace, nil, "")
 	if err != nil {
 		return err
 	}
 
-	// We create schedule in memory using the latest state
-	w.scheduleWork(ctx)
-	w.updateAvailability(ctx)
+	for _, taskExec := range allTask {
+		w.scheduleWorkIndvidual(ctx, taskExec, "backfill")
+	}
 
+	// raft will block before listened to w.assignmentUpdated channel
+	// therefore, we must consume.
+	// this also act to make taskExecutionStoreRO consistent.
 	go func() {
-		// Start listening
 		for {
 			select {
 			case <-ctx.Done():
-				return
-			case msg := <-subscription.Listen():
-				switch evt := msg.(type) {
-				case scheduler.EventTaskExecutionAssignmentUpdated:
-					// If there is an adjustment in the assignment, we do work here
-					log.Println("worker: got task execution assignment updated event")
-					w.scheduleWork(ctx)
-				case scheduler.EventTaskExecutionCreated:
-					// TODO: refactor2
-					if evt.AssignmentState == nil || evt.AssignmentState.AssignedTo != w.client.ID() {
-						continue
-					}
-
-					log.Println("worker: got immediate task")
-
-					q, ok := w.queue[evt.QueueID]
-					if !ok {
-						// queue not found
-						log.Printf("worker: queue %v not found", evt.QueueID)
-						continue
-					}
-
-					q <- evt
-				}
+			case taskExec := <-w.assignmentUpdated:
+				w.scheduleWorkIndvidual(ctx, taskExec, "live")
 			}
 		}
 	}()
+
+	w.updateAvailability(ctx)
 
 	return nil
 }
@@ -129,124 +112,157 @@ func (w *worker) updateAvailability(ctx context.Context) {
 	}
 }
 
-// Schedule work according to our "local" state
-// We should Propose to raft firt, to get the very latest state.
-func (w *worker) scheduleWork(ctx context.Context) {
-	tgs := make(map[timeQueue][]*entity.TaskExecution)
+type TaskExecutionRuntime struct {
+	*entity.TaskExecution
+	ctx    context.Context
+	cancel func()
+}
 
-	for _, queue := range []string{"sendInvoice()"} {
-		taskOfThisQueue, err := w.taskExecutionStoreRO.Get(ctx, w.namespace, []string{queue}, "")
-		if err != nil {
-			log.Printf("Failed to load task execution instance (queue=%v): %v", queue, err)
-			continue
-		}
+func (t *TaskExecutionRuntime) Cancel() {
+	if t == nil {
+		return
+	}
+	t.cancel()
+}
 
-		var newCount int
+func (w *worker) cleanUp(taskExec *TaskExecutionRuntime) {
+	taskExec.Cancel()
 
-		// Iterate all of our task..
-		for _, taskExec := range taskOfThisQueue {
-			if taskExec.Status != entity.ExecutionStatusPending {
-				continue
-			}
-
-			if taskExec.AssignmentState == nil {
-				// this task should not be run, since not yet assigned by leader
-				continue
-			}
-
-			if taskExec.AssignmentState.AssignedTo != w.client.ID() {
-				// don't schedule other people task :)
-				continue
-			}
-
-			// book keep / idempotency
-			// todo: lock
-			if _, ok := w.scheduled[queueTaskPair{queue, taskExec.Id}]; ok {
-				// already scheduled (has cron)
-				continue
-			}
-
-			func() {
-				defer w.scheduledLock.Unlock()
-				w.scheduledLock.Lock()
-				w.scheduled[queueTaskPair{queue, taskExec.Id}] = struct{}{}
-			}()
-
-			newCount++
-
-			tq := timeQueue{taskExec.ScheduledRunAt, taskExec.QueueID, taskExec.AssignmentState.AssignedTo}
-			if _, ok := tgs[tq]; !ok {
-				tgs[tq] = make([]*entity.TaskExecution, 0)
-			}
-			tgs[tq] = append(tgs[tq], taskExec)
-		}
+	if taskExec == nil {
+		return
 	}
 
-	// TODO: every worker client should persist the work inside their own local storage / DB
-	// to keep track.
-	// TODO: Client programming language, maybe interact via network/websocket.
-	// for now we keep it simple, we just use the in process golang worker.
-	// TODO: worker type, registered to server (for work assignment logic/strategy)
+	if taskExec.TaskExecution == nil {
+		return
+	}
 
-	for tg := range tgs {
-		q, ok := w.queue[tg.queueID]
-		if !ok {
-			// queue not found
-			log.Printf("warn: queue %v not found", tg.queueID)
-			continue
+	func() {
+		defer w.scheduledLock.Unlock()
+		w.scheduledLock.Lock()
+		delete(w.scheduled, queueTaskPair{taskExec.QueueID, taskExec.Id})
+	}()
+
+	func() {
+		defer w.timeBucketLock.Unlock()
+		w.timeBucketLock.Lock()
+
+		tq := timeQueue{taskScheduledRunAt: taskExec.ScheduledRunAt, queueID: taskExec.QueueID}
+		tasks := w.timeBucket[tq]
+		for idx, tr := range tasks {
+			if tr.QueueID == taskExec.QueueID && tr.Id == taskExec.Id {
+				tasks = append(tasks[:idx], tasks[idx+1:]...)
+				w.timeBucket[tq] = tasks
+				break
+			}
 		}
 
-		tasks := tgs[tg]
+		if len(tasks) == 0 {
+			delete(w.timeBucket, tq)
+		}
+	}()
 
-		// we can execute all old task..
-		// or handles it according to different strategy..
-		// or simply marked it as ExecutionStatusMissed
+	// maybe cancel the timer as well
+}
 
-		executeAt := time.Until(tg.taskScheduledRunAt)
+func (w *worker) scheduleWorkIndvidual(ctx context.Context, taskExec *entity.TaskExecution, _ string) {
+	taskCoord := queueTaskPair{taskExec.QueueID, taskExec.Id}
+	prev, ok := w.scheduled[taskCoord]
+
+	// if it's not / no longer pending
+	if taskExec.Status != entity.ExecutionStatusPending {
+		w.cleanUp(prev)
+		return
+	}
+
+	// if it's not / no longer assigned
+	if taskExec.AssignmentStatus == nil {
+		w.cleanUp(prev)
+		return
+	}
+
+	// if it's (not / no longer) our task
+	if taskExec.AssignmentStatus.AssignedTo != w.client.ID() {
+		w.cleanUp(prev)
+		return
+	}
+
+	// if the queue no longer found
+	q, ok := w.queue[taskExec.QueueID]
+	if !ok {
+		w.cleanUp(prev)
+		log.Printf("warn: queue %v not found in this node", taskExec.QueueID)
+		return
+	}
+
+	ctx, cancel := context.WithCancel(ctx)
+	taskExecRuntime := &TaskExecutionRuntime{
+		TaskExecution: taskExec, ctx: ctx, cancel: cancel,
+	}
+
+	// reference for future
+	func() {
+		defer w.scheduledLock.Unlock()
+		w.scheduledLock.Lock()
+		w.scheduled[queueTaskPair{taskExec.QueueID, taskExec.Id}] = taskExecRuntime
+	}()
+
+	tq := timeQueue{taskExec.ScheduledRunAt, taskExec.QueueID}
+	var newTimeBucket bool
+
+	// initialize
+	func() {
+		defer w.timeBucketLock.Unlock()
+		w.timeBucketLock.Lock()
+
+		if _, ok := w.timeBucket[tq]; !ok {
+			w.timeBucket[tq] = make([]*TaskExecutionRuntime, 0)
+			newTimeBucket = true
+		}
+		w.timeBucket[tq] = append(w.timeBucket[tq], taskExecRuntime)
+	}()
+
+	// log.Printf("worker: got task execution assignment updated event (%v)", mode)
+
+	if newTimeBucket {
+		executeAt := time.Until(tq.taskScheduledRunAt)
+
+		// TODO: choose what's best
+		if executeAt < -10*time.Second {
+			log.Println("worker: warn. stale task will not be executed")
+			return
+		} else if executeAt < 0 {
+			// immediately execued
+			executeAt = 0
+		}
 
 		time.AfterFunc(executeAt, func() {
-			// we can re-query here, instead of using "tasks" (to reduce memory)
-			// after we move to chDB
-			for _, taskExec := range tasks {
+			var taskExecs []*TaskExecutionRuntime
+			func() {
+				defer w.timeBucketLock.Unlock()
+				w.timeBucketLock.Lock()
+				taskExecs = w.timeBucket[tq]
+			}()
+
+			for _, taskExec := range taskExecs {
+				if taskExec.ctx.Err() != nil {
+					// we will no longer execute
+					continue
+				}
+
 				q <- taskExec
 			}
-			for _, taskExec := range tasks {
-				func() {
-					defer w.scheduledLock.Unlock()
-					w.scheduledLock.Lock()
-					delete(w.scheduled, queueTaskPair{tg.queueID, taskExec.Id})
-				}()
-			}
 		})
-
-		if executeAt <= 0 {
-			go func() {
-				// to avoid many goroutine, use UpdateAvailability's backpressure mechanism.
-				for _, scheduledTask := range tasks {
-					q <- scheduledTask
-				}
-				for _, taskExec := range tasks {
-					func() {
-						defer w.scheduledLock.Unlock()
-						w.scheduledLock.Lock()
-						delete(w.scheduled, queueTaskPair{tg.queueID, taskExec.Id})
-					}()
-				}
-			}()
-		}
 	}
 }
 
 type timeQueue struct {
 	taskScheduledRunAt time.Time
 	queueID            string
-	nodeID             uint64
 }
 
 // Called everytime becoming raft leader
 // Context will be cancelled when stepping down from raft leader
 func (w *worker) OnBecomingRaftLeader(ctx context.Context, term uint64, leaderID uint64) error {
-
 	ticker := time.NewTicker(10 * time.Second)
 
 	timers := make(map[string]*time.Timer)

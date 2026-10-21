@@ -93,23 +93,21 @@ func (ls *leader) checkTaskExecutionAssignment(ctx context.Context) error {
 		return err
 	}
 
-	var notifyWorker bool
-
 	for taskExec := range taskExecs {
-		if taskExec.AssignmentState != nil {
-			if _, ok := healthyUIDs[taskExec.AssignmentState.AssignedTo]; ok {
+		if taskExec.AssignmentStatus != nil {
+			if _, ok := healthyUIDs[taskExec.AssignmentStatus.AssignedTo]; ok {
 				continue
 			}
 			// notice we don't do "upscale" if healthy node increase :)
 			// maybe manual rebalance later :)
 		} else {
-			taskExec.AssignmentState = &entity.AssignmentState{}
+			taskExec.AssignmentStatus = &entity.AssignmentState{}
 		}
 
-		taskExec.AssignmentState.AssignedTo = healthyUID
-		taskExec.AssignmentState.AssignedBy = ls.client.ID()
-		taskExec.AssignmentState.AssignmentTime = time.Now()
-		taskExec.AssignmentState.AssignmentCount++
+		taskExec.AssignmentStatus.AssignedTo = healthyUID
+		taskExec.AssignmentStatus.AssignedBy = ls.client.ID()
+		taskExec.AssignmentStatus.AssignmentTime = time.Now()
+		taskExec.AssignmentStatus.AssignmentCount++
 
 		// TODO: use batch inside the raft to make it more efficient
 		// but it needed the allocation algorithm to be deterministic
@@ -119,17 +117,6 @@ func (ls *leader) checkTaskExecutionAssignment(ctx context.Context) error {
 			// determien error, maybe panic or maybe just fail
 			log.Printf("failed to (re)assign work: %v", err)
 		}
-		notifyWorker = true
-	}
-
-	if notifyWorker {
-		log.Printf("leader: notifying workers that there is an update in task execution table")
-		_, err := ls.client.Propose(ctx, scheduler.NotifyTaskExecutionAssignmentUpdated{})
-		if err != nil {
-			log.Printf("failed to (re)assign work: %v", err)
-		}
-	} else {
-		log.Printf("leader: all good in the scheduler world")
 	}
 
 	return nil

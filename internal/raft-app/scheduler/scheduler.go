@@ -57,6 +57,8 @@ type scheduler struct {
 
 	scheduledTaskUsecase *mycontent_base.Handler[*entity.RecurringTask]
 	taskExecutionUsecase *mycontent_base.Handler[*entity.TaskExecution]
+
+	schedule chan *entity.TaskExecution
 }
 
 type CommandWrapper struct {
@@ -83,7 +85,7 @@ type EventWorkCreatedRecurringTask struct {
 
 var ErrRetryable = errors.New("retryable")
 
-func New(namespace string, topic notifier.Topic, dbJob *badger.DB) *scheduler {
+func New(namespace string, topic notifier.Topic, dbJob *badger.DB, schedule chan *entity.TaskExecution) *scheduler {
 	scheduledTaskStorage := content_badger.New(dbJob, TableRecurringTask, 0)
 	taskExecutionStorage := content_badger.NewAutoIncrement(dbJob, TableTaskExecution, 1) // refer to queue
 
@@ -95,6 +97,7 @@ func New(namespace string, topic notifier.Topic, dbJob *badger.DB) *scheduler {
 		topic:                topic,
 		scheduledTaskUsecase: scheduledTaskUsecase,
 		taskExecutionUsecase: taskExecutionUsecase,
+		schedule:             schedule,
 	}
 }
 
@@ -179,6 +182,8 @@ func (m *scheduler) OnUpdateV2(ctx context.Context, entry raft.EntryV2) (any, er
 		if err != nil {
 			return nil, err
 		}
+
+		m.schedule <- result
 
 		return result, nil
 

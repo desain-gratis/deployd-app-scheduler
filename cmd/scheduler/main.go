@@ -61,16 +61,13 @@ func enableSchedulerModule(ctx context.Context, router *httprouter.Router) {
 	topic := notifier_impl.NewStandardTopic()
 
 	namespace := "deployd"
-	assignmentUpdated := make(chan *entity.TaskExecution) // to sync schedule
-	schedulerApp := scheduler.New(namespace, topic, db, assignmentUpdated)
+	executorCh := make(chan *entity.TaskExecution) // to sync schedule
+	schedulerApp := scheduler.New(namespace, topic, db, executorCh)
 
 	schedulerRaft, _, err := runneretcd.RunWithConfig(ctx, os.Getenv("DEPLOYD_RAFT"), "scheduler", schedulerApp)
 	if err != nil {
 		log.Fatal().Msgf("err running raft: %v", err)
 	}
-
-	recurringTaskUsecase := schedulerApp.GetRecurringTaskStore()
-	taskExecutionUsecase := schedulerApp.GetTaskExecutionStore()
 
 	schedulerClient := scheduler.NewClient(schedulerRaft)
 
@@ -80,7 +77,20 @@ func enableSchedulerModule(ctx context.Context, router *httprouter.Router) {
 		"echoReverse()": scheduler_integration.NewPooledQueue(ctx, schedulerClient, 30, echoReverse),
 	}
 
-	worker := scheduler_integration.NewWorker(namespace, topic, schedulerClient, recurringTaskUsecase, taskExecutionUsecase, queue, assignmentUpdated)
+	recurringTaskUsecase := schedulerApp.GetRecurringTaskStore()
+	taskExecutionUsecase := schedulerApp.GetTaskExecutionStore()
+
+	worker := scheduler_integration.NewWorker(
+		namespace,
+		topic,
+		schedulerClient,
+		recurringTaskUsecase,
+		taskExecutionUsecase,
+		queue,
+		executorCh,
+	)
+	_ = worker.Init(ctx)
+
 	httpAPI := scheduler_integration.NewHttpAPI(topic, schedulerClient)
 
 	err = schedulerRaft.Run(ctx, worker.OnBecomingRaftLeader)

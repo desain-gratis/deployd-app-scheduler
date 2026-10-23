@@ -50,7 +50,7 @@ func NewWorker(
 	queue map[string]chan *TaskExecutionRuntime,
 	assignmentUpdated chan *entity.TaskExecution,
 ) *worker {
-	return &worker{
+	w := &worker{
 		topic:                 topic,
 		toLeader:              make(chan string),
 		taskDefinitionStoreRO: taskDefinitionStoreRO,
@@ -64,30 +64,38 @@ func NewWorker(
 		assignmentUpdated:     assignmentUpdated,
 		timeBucketLock:        &sync.Mutex{},
 	}
+
+	return w
 }
 
-func (w *worker) Run(ctx context.Context) error {
+// Can be called after raft "snapshot" is ready, but before the raft is ran
+func (w *worker) Init(ctx context.Context) error {
 	allTask, err := w.taskExecutionStoreRO.Get(ctx, w.namespace, nil, "")
 	if err != nil {
 		return err
 	}
 
 	for _, taskExec := range allTask {
-		w.scheduleWorkIndvidual(ctx, taskExec, "backfill")
+		w.scheduleWork(ctx, taskExec, "backfill")
 	}
 
-	// raft will block before listened to w.assignmentUpdated channel
-	// therefore, we must consume.
-	// this also act to make taskExecutionStoreRO consistent.
 	go func() {
 		for {
 			select {
 			case <-ctx.Done():
 			case taskExec := <-w.assignmentUpdated:
-				w.scheduleWorkIndvidual(ctx, taskExec, "live")
+				w.scheduleWork(ctx, taskExec, "live")
 			}
 		}
 	}()
+
+	return nil
+}
+
+func (w *worker) Run(ctx context.Context) error {
+	// raft will block before listened to w.assignmentUpdated channel
+	// therefore, we must consume.
+	// this also act to make taskExecutionStoreRO consistent.
 
 	w.updateAvailability(ctx)
 
@@ -164,7 +172,8 @@ func (w *worker) cleanUp(taskExec *TaskExecutionRuntime) {
 	// maybe cancel the timer as well
 }
 
-func (w *worker) scheduleWorkIndvidual(ctx context.Context, taskExec *entity.TaskExecution, _ string) {
+// scheduleWork materialize task execution into an in memory data structure, ready to be executed
+func (w *worker) scheduleWork(ctx context.Context, taskExec *entity.TaskExecution, _ string) {
 	taskCoord := queueTaskPair{taskExec.QueueID, taskExec.Id}
 	prev, ok := w.scheduled[taskCoord]
 
@@ -185,6 +194,8 @@ func (w *worker) scheduleWorkIndvidual(ctx context.Context, taskExec *entity.Tas
 		w.cleanUp(prev)
 		return
 	}
+
+	// TODO: only materialize task execution within the next x hours
 
 	// if the queue no longer found
 	q, ok := w.queue[taskExec.QueueID]

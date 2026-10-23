@@ -43,7 +43,7 @@ func NewPooledQueue(ctx context.Context, client *genericjob.Client, count int, f
 				if err != nil {
 					taskExec.Status = entity.ExecutionStatusFailed
 				} else {
-					taskExec.Status = entity.ExecutionStatusDone
+					taskExec.Status = entity.ExecutionStatusSucceed
 				}
 
 				tComplete := time.Now().In(taskExec.UserTime.Location())

@@ -12,7 +12,8 @@ var _ mycontent.Data = &TaskExecution{}
 type TaskExecution struct {
 	Ns string `json:"namespace"`
 
-	Id string `json:"id"`
+	Id       string  `json:"id"`
+	ParentId *string `json:"parent_id"`
 
 	TaskID  string `json:"task_id"`
 	QueueID string `json:"queue_id"`
@@ -31,6 +32,9 @@ type TaskExecution struct {
 	PublishedAt time.Time `json:"published_at"`
 	URLx        string    `json:"url"`
 }
+type ReccurenceState struct {
+	RecurrenceID string `json:"recurrence_id"`
+}
 
 type AssignmentState struct {
 	AssignedTo      uint64    `json:"assigned_to"` // Who to execute this task, as assigned by the Leader
@@ -41,13 +45,22 @@ type AssignmentState struct {
 
 type ExecutionStatus string
 
+// -- materialized task only concern with this ---
+// PENDING -> IN PROGRESS -> SUCCEED       (done as expected without error)
+//         |              |_> FAILED       (finished with error)     --> leader will determine solution (retry)
+//         |              |_> INTERRUPTED  (server shutdown etc..)   --> leader will determine solution (retry)
+//         |              |_> CANCELLED    (user cancel)
+//         |_> CANCELLED
+
 const (
-	ExecutionStatusMissed     ExecutionStatus = "MISSED"
-	ExecutionStatusPending    ExecutionStatus = "PENDING"
-	ExecutionStatusInProgress ExecutionStatus = "IN_PROGRESS"
-	ExecutionStatusTimeout    ExecutionStatus = "TIMEOUT"
-	ExecutionStatusFailed     ExecutionStatus = "FAILED"
-	ExecutionStatusDone       ExecutionStatus = "DONE"
+	ExecutionStatusMissed      ExecutionStatus = "MISSED"
+	ExecutionStatusPending     ExecutionStatus = "PENDING"
+	ExecutionStatusInProgress  ExecutionStatus = "IN_PROGRESS"
+	ExecutionStatusTimeout     ExecutionStatus = "TIMEOUT"
+	ExecutionStatusInterrupted ExecutionStatus = "INTERRUPTED"
+	ExecutionStatusCancelled   ExecutionStatus = "CANCELLED"
+	ExecutionStatusFailed      ExecutionStatus = "FAILED"
+	ExecutionStatusSucceed     ExecutionStatus = "SUCCEED"
 )
 
 func (a *TaskExecution) CreatedTime() time.Time {

@@ -2,7 +2,7 @@ module github.com/desain-gratis/deployd-app-scheduler
 
 go 1.26.0
 
-// replace github.com/desain-gratis/common => ../common
+replace github.com/desain-gratis/common => ../common
 
 require (
 	github.com/arcward/crong v0.0.0-20240827163849-4abe2a5262db

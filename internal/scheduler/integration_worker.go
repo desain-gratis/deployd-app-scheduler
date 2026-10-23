@@ -76,7 +76,7 @@ func (w *worker) Init(ctx context.Context) error {
 	}
 
 	for _, taskExec := range allTask {
-		w.scheduleWork(ctx, taskExec, "backfill")
+		w.schedulePending(ctx, taskExec, "backfill")
 	}
 
 	go func() {
@@ -84,7 +84,8 @@ func (w *worker) Init(ctx context.Context) error {
 			select {
 			case <-ctx.Done():
 			case taskExec := <-w.assignmentUpdated:
-				w.scheduleWork(ctx, taskExec, "live")
+				w.checkCancellation(ctx, taskExec)
+				w.schedulePending(ctx, taskExec, "live")
 			}
 		}
 	}()
@@ -172,26 +173,52 @@ func (w *worker) cleanUp(taskExec *TaskExecutionRuntime) {
 	// maybe cancel the timer as well
 }
 
-// scheduleWork materialize task execution into an in memory data structure, ready to be executed
-func (w *worker) scheduleWork(ctx context.Context, taskExec *entity.TaskExecution, _ string) {
+// for loaded task (in memory), we should check whether it's still relevant or not
+func (w *worker) checkCancellation(_ context.Context, taskExec *entity.TaskExecution) {
 	taskCoord := queueTaskPair{taskExec.QueueID, taskExec.Id}
 	prev, ok := w.scheduled[taskCoord]
-
-	// if it's not / no longer pending
-	if taskExec.Status != entity.ExecutionStatusPending {
-		w.cleanUp(prev)
+	if !ok {
+		// no need to listen update, since it's already gone
 		return
 	}
 
-	// if it's not / no longer assigned
+	// task has been re-queued
 	if taskExec.AssignmentStatus == nil {
-		w.cleanUp(prev)
+		prev.Cancel()
 		return
 	}
 
-	// if it's (not / no longer) our task
+	// task no longer ours :(
 	if taskExec.AssignmentStatus.AssignedTo != w.client.ID() {
-		w.cleanUp(prev)
+		prev.Cancel()
+		return
+	}
+
+	// user cancels the task
+	// only cancel if the task is still pending or in progress
+	if taskExec.Status == entity.ExecutionStatusCancelled {
+		switch prev.Status {
+		case entity.ExecutionStatusInProgress, entity.ExecutionStatusPending:
+			prev.Cancel()
+		}
+		return
+	}
+}
+
+// schedulePending materialize task execution into an in memory data structure, ready to be executed
+func (w *worker) schedulePending(ctx context.Context, taskExec *entity.TaskExecution, _ string) {
+	// if it's not pending
+	if taskExec.Status != entity.ExecutionStatusPending {
+		return
+	}
+
+	// if it's not assigned
+	if taskExec.AssignmentStatus == nil {
+		return
+	}
+
+	// if it's not our task
+	if taskExec.AssignmentStatus.AssignedTo != w.client.ID() {
 		return
 	}
 
@@ -200,7 +227,6 @@ func (w *worker) scheduleWork(ctx context.Context, taskExec *entity.TaskExecutio
 	// if the queue no longer found
 	q, ok := w.queue[taskExec.QueueID]
 	if !ok {
-		w.cleanUp(prev)
 		log.Printf("warn: queue %v not found in this node", taskExec.QueueID)
 		return
 	}

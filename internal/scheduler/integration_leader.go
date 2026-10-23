@@ -86,8 +86,6 @@ func (ls *leader) checkTaskExecutionAssignment(ctx context.Context) error {
 		return fmt.Errorf("leader: no healthy node")
 	}
 
-	log.Printf("leader: healthy uids %v", healthyUIDs)
-
 	taskExecs, err := ls.worker.taskExecutionStoreRO.Stream(ctx, "deployd", nil, "")
 	if err != nil {
 		return err

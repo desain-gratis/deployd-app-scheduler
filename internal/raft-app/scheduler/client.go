@@ -53,17 +53,15 @@ func (c *Client) Propose(ctx context.Context, request any) (any, error) {
 	case CreateRecurringTask:
 		command = Command_User_CreateRecurringTask
 	case UpdateRecurringTask:
-		command = Command_Leader_UpdateTask
+		command = Command_Leader_UpdateRecurringTask
 	case RequestRegenerateTaskInstances:
-		command = Command_Leader_RequestRegenerateTaskExecution
+		command = Command_Leader_GenerateRecurringTaskExecution
 	case CreateTaskExecution:
 		command = Command_Leader_CreateTaskExecution
 	case UpdateTaskExecution:
 		command = Command_Worker_UpdateTaskExecution
 	case UpdateAvailability:
 		command = Command_Worker_UpdateAvailability
-	case NotifyTaskExecutionAssignmentUpdated:
-		command = Command_Leader_NotifyTaskExecutionAssignmentUpdated
 	default:
 		return nil, fmt.Errorf("unsupported type %T", req)
 	}

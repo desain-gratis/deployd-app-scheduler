@@ -17,35 +17,9 @@ import (
 	"github.com/dgraph-io/badger/v4"
 )
 
-type Command string
-type Event string
-
 const (
-	TableRecurringTask = "scheduled_task_definition"
+	TableRecurringTask = "recurring_task"
 	TableTaskExecution = "task_execution"
-
-	// Subscribe to events related to raft app
-	Command_Subscribe Command = "subscribe"
-
-	// Create a scheduled task
-	Command_User_CreateRecurringTask Command = "user.recurring-task.create"
-
-	// Update a scheduled task
-	Command_Leader_UpdateTask Command = "leader.update-task"
-
-	Command_Leader_RequestRegenerateTaskExecution       Command = "leader.request-regenerate-task-execution"
-	Command_Leader_CreateTaskExecution                  Command = "leader.task-execution.create"
-	Command_Leader_NotifyTaskExecutionAssignmentUpdated Command = "leader.task-execution.notify-assignment-updated"
-
-	Command_Worker_UpdateTaskExecution         Command = "worker.task-execution.update"
-	Command_Worker_UpdateAvailability          Command = "worker.request-work"
-	Command_Worker_UpdateAvailabilityImmediate Command = "worker.request-work-immediate"
-	// When leader started, it will submit this command
-	Command_Leader_UpdateLastSchedulingTime Command = "leader.update-last-scheduling-time"
-
-	// When task is triggered
-	Command_Worker_ExecuteTask Command = "worker.execute-task"
-	Command_Worker_UpdateTask  Command = "worker.update-task"
 )
 
 var _ raft.ApplicationV2 = (*scheduler)(nil)
@@ -58,7 +32,7 @@ type scheduler struct {
 	scheduledTaskUsecase *mycontent_base.Handler[*entity.RecurringTask]
 	taskExecutionUsecase *mycontent_base.Handler[*entity.TaskExecution]
 
-	schedule chan *entity.TaskExecution
+	executor chan *entity.TaskExecution
 }
 
 type CommandWrapper struct {
@@ -68,24 +42,9 @@ type CommandWrapper struct {
 
 type ApplyResult func() (any, error)
 
-type EventRecurringTaskCreated *entity.RecurringTask
-type EventRecurringTaskUpdated *entity.RecurringTask
-type EventRecurringTaskNeedRegenerate *entity.RecurringTask
-type EventWorkerRequestedWork UpdateAvailability
-
-type EventTaskExecutionCreated *entity.TaskExecution
-
-type EventTaskExecutionAssignmentUpdated struct{}
-
-type EventWorkCreatedRecurringTask struct {
-	ScheduledRunAt time.Time
-	Queue          string
-	Tasks          []*entity.TaskExecution
-}
-
 var ErrRetryable = errors.New("retryable")
 
-func New(namespace string, topic notifier.Topic, dbJob *badger.DB, schedule chan *entity.TaskExecution) *scheduler {
+func New(namespace string, topic notifier.Topic, dbJob *badger.DB, executor chan *entity.TaskExecution) *scheduler {
 	scheduledTaskStorage := content_badger.New(dbJob, TableRecurringTask, 0)
 	taskExecutionStorage := content_badger.NewAutoIncrement(dbJob, TableTaskExecution, 1) // refer to queue
 
@@ -97,7 +56,7 @@ func New(namespace string, topic notifier.Topic, dbJob *badger.DB, schedule chan
 		topic:                topic,
 		scheduledTaskUsecase: scheduledTaskUsecase,
 		taskExecutionUsecase: taskExecutionUsecase,
-		schedule:             schedule,
+		executor:             executor,
 	}
 }
 
@@ -140,7 +99,7 @@ func (m *scheduler) OnUpdateV2(ctx context.Context, entry raft.EntryV2) (any, er
 			return nil, err
 		}
 		return m.userCreateTask(ctx, data, "create")
-	case Command_Leader_UpdateTask:
+	case Command_Leader_UpdateRecurringTask:
 		// Update the scheduled task
 		data, err := parseAs[UpdateRecurringTask](cmd.Value)
 		if err != nil {
@@ -183,11 +142,11 @@ func (m *scheduler) OnUpdateV2(ctx context.Context, entry raft.EntryV2) (any, er
 			return nil, err
 		}
 
-		m.schedule <- result
+		m.executor <- result
 
 		return result, nil
 
-	case Command_Leader_RequestRegenerateTaskExecution:
+	case Command_Leader_GenerateRecurringTaskExecution:
 		data, err := parseAs[RequestRegenerateTaskInstances](cmd.Value)
 		if err != nil {
 			return nil, err
@@ -215,63 +174,10 @@ func (m *scheduler) OnUpdateV2(ctx context.Context, entry raft.EntryV2) (any, er
 		// leader will then process this to allocate task
 		m.topic.Broadcast(ctx, EventWorkerRequestedWork(rw))
 		return "SUCCESS", nil
-	case Command_Leader_NotifyTaskExecutionAssignmentUpdated:
-		// NOTIFY WORKERS, NEED TO UPDATE ALL OF THEIR IN MEMORY CRON (eg. CREATE / DELETE TIMERS, etc..), ETC
-		m.topic.Broadcast(
-			ctx,
-			EventTaskExecutionAssignmentUpdated{}, // or all tasks is evaluated by raft; worker can consume their already updated DB
-		)
-
-		return "SUCCESS", nil
 
 	default:
 		return nil, fmt.Errorf("%w command: %s", errors.ErrUnsupported, cmd.Name)
 	}
-}
-
-type CreateRecurringTask struct {
-	Task       entity.RecurringTask `json:"task_definition"`
-	ServerTime time.Time            `json:"server_time"`
-}
-
-type UpdateRecurringTask CreateRecurringTask
-
-type RequestRegenerateTaskInstances struct {
-	RefIDs []string
-	ID     string
-}
-
-// TaskExecution Instance
-type CreateTaskExecution *entity.TaskExecution
-type UpdateTaskExecution *entity.TaskExecution
-
-type UpdateAvailability struct {
-	NodeID   uint64
-	QueueIDs []string
-}
-
-// Notifies worker that task execution tables have been updated
-// Worker should update their in-memory schedule
-type NotifyTaskExecutionAssignmentUpdated struct{}
-
-type ReassignNode struct {
-	FromNode uint64
-	ToNode   uint64
-	QueueIDs map[string][]NodeQueuePair
-}
-
-type NodeQueuePair struct {
-	Queue  *entity.QueueState
-	NodeID uint64
-}
-
-type TimeRange struct {
-	Start time.Time `json:"start"`
-	End   time.Time `json:"end"`
-}
-
-type UpdateLastSchedulingTime struct {
-	Time time.Time `json:"time"`
 }
 
 func (m *scheduler) userCreateTask(ctx context.Context, data CreateRecurringTask, mode string) (any, error) {

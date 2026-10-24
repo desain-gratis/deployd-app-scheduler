@@ -107,7 +107,8 @@ func enableSchedulerModule(ctx context.Context, router *httprouter.Router) {
 	taskExecutionHandler := mycontentapi.New(taskExecutionUsecase, publicBaseURL+"/task/instance", []string{"queue_id"})
 
 	router.GET("/hello", httpAPI.Hello)
-	router.POST("/schedule", httpAPI.CreateTask)
+	router.POST("/task/recurring", httpAPI.CreateRecurringTask)
+	router.POST("/task", httpAPI.ExecuteTask)
 
 	router.GET("/task", recurringTaskHandler.Get)
 	router.GET("/task/instance", taskExecutionHandler.Get)

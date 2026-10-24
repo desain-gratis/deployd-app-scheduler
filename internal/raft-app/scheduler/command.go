@@ -21,11 +21,8 @@ const (
 	// Generate recurring task's execution
 	Command_Leader_GenerateRecurringTaskExecution Command = "leader.recurring-task.generate"
 
-	// Create task execution (for leader)
-	Command_Leader_CreateTaskExecution Command = "leader.task-execution.create"
-
-	// Create task execution (for user)
-	Command_User_CreateTaskExecution Command = "user.task-execution.create"
+	// Create task execution (for leader & user)
+	Command_CreateTaskExecution Command = "task-execution.create"
 
 	// Worker update task execution
 	Command_Worker_UpdateTaskExecution Command = "worker.task-execution.update"

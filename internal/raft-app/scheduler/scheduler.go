@@ -107,7 +107,7 @@ func (m *scheduler) OnUpdateV2(ctx context.Context, entry raft.EntryV2) (any, er
 		}
 		return m.userCreateTask(ctx, CreateRecurringTask(data), "update")
 
-	case Command_Leader_CreateTaskExecution:
+	case Command_CreateTaskExecution:
 		data, err := parseAs[CreateTaskExecution](cmd.Value)
 		if err != nil {
 			return nil, err
@@ -119,7 +119,7 @@ func (m *scheduler) OnUpdateV2(ctx context.Context, entry raft.EntryV2) (any, er
 			return nil, err
 		}
 
-		m.topic.Broadcast(ctx, EventTaskExecutionCreated(result))
+		m.topic.Broadcast(ctx, EventTaskExecutionCreated(data))
 
 		return result, nil
 	case Command_Worker_UpdateTaskExecution:

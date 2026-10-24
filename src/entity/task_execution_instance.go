@@ -15,7 +15,6 @@ type TaskExecution struct {
 	Id       string  `json:"id"`
 	ParentId *string `json:"parent_id"`
 
-	TaskID  string `json:"task_id"`
 	QueueID string `json:"queue_id"`
 
 	ScheduledRunAt time.Time       `json:"scheduled_run_at"`
@@ -29,9 +28,22 @@ type TaskExecution struct {
 
 	AssignmentStatus *AssignmentState `json:"assignment_status"`
 
+	ExecutionMode TaskExecutionMode `json:"execution_mode"` // todo: naming
+
+	RecurringTaskID *string `json:"recurring_task_id"`
+
 	PublishedAt time.Time `json:"published_at"`
 	URLx        string    `json:"url"`
 }
+
+type TaskExecutionMode string
+
+const (
+	TaskExecutionModeRecurring TaskExecutionMode = "RECURRING"
+	TaskExecutionModeImmediate TaskExecutionMode = "IMMEDIATE"
+	TaskExecutionModeScheduled TaskExecutionMode = "SCHEDULED"
+)
+
 type ReccurenceState struct {
 	RecurrenceID string `json:"recurrence_id"`
 }

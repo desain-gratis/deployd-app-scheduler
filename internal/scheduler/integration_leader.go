@@ -59,7 +59,39 @@ func (ls *leader) Handler(ctx context.Context, term, leaderID uint64) {
 					log.Printf("leader: err creating scheduled task execution instances %v", err)
 					continue
 				}
+			case scheduler.EventTaskExecutionCreated:
+				taskExec := (*entity.TaskExecution)(evt)
 
+				// handle immediate evt
+				// TODO: refactor eg. assignTask pending
+				if taskExec.Status != entity.ExecutionStatusPending ||
+					taskExec.ExecutionMode != entity.TaskExecutionModeImmediate ||
+					taskExec.AssignmentStatus != nil {
+					continue
+				}
+
+				healthyUIDs := map[uint64]struct{}{}
+				var healthyUID uint64
+
+				// only available in leader
+				for nodeID, progress := range ls.raftNode.Status().Progress {
+					if progress.RecentActive {
+						healthyUIDs[nodeID] = struct{}{}
+						healthyUID = nodeID // TODO: for now just select the last
+					}
+				}
+
+				taskExec.AssignmentStatus = &entity.AssignmentState{}
+				taskExec.AssignmentStatus.AssignedTo = healthyUID
+				taskExec.AssignmentStatus.AssignedBy = ls.client.ID()
+				taskExec.AssignmentStatus.AssignmentTime = time.Now()
+				taskExec.AssignmentStatus.AssignmentCount++
+
+				_, err := ls.client.Propose(ctx, scheduler.UpdateTaskExecution(taskExec))
+				if err != nil {
+					// determien error, maybe panic or maybe just fail
+					log.Printf("failed to (re)assign work: %v", err)
+				}
 			default:
 				// log.Printf("Unknown job evt")
 			}
@@ -173,15 +205,16 @@ func (ls *leader) generateInstances(ctx context.Context, task *entity.RecurringT
 		}
 
 		state := &entity.TaskExecution{
-			Ns:             task.Ns,
-			Id:             execID,
-			TaskID:         task.Id,
-			QueueID:        task.QueueID,
-			ScheduledRunAt: next,
-			Status:         status,
-			PublishedAt:    serverTime,
-			Input:          task.Input,
-			UserTime:       task.UserTime,
+			Ns:              task.Ns,
+			Id:              execID,
+			QueueID:         task.QueueID,
+			ScheduledRunAt:  next,
+			Status:          status,
+			PublishedAt:     serverTime,
+			Input:           task.Input,
+			UserTime:        task.UserTime,
+			ExecutionMode:   entity.TaskExecutionModeRecurring,
+			RecurringTaskID: &task.Id,
 		}
 
 		_, err := ls.client.Propose(ctx, scheduler.CreateTaskExecution(state))

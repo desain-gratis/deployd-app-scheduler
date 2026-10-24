@@ -76,7 +76,7 @@ func (w *worker) Init(ctx context.Context) error {
 	}
 
 	for _, taskExec := range allTask {
-		w.schedulePending(ctx, taskExec, "backfill")
+		w.loadTaskExec(ctx, taskExec, "backfill")
 	}
 
 	go func() {
@@ -85,7 +85,7 @@ func (w *worker) Init(ctx context.Context) error {
 			case <-ctx.Done():
 			case taskExec := <-w.assignmentUpdated:
 				w.checkCancellation(ctx, taskExec)
-				w.schedulePending(ctx, taskExec, "live")
+				w.loadTaskExec(ctx, taskExec, "live")
 			}
 		}
 	}()
@@ -205,8 +205,8 @@ func (w *worker) checkCancellation(_ context.Context, taskExec *entity.TaskExecu
 	}
 }
 
-// schedulePending materialize task execution into an in memory data structure, ready to be executed
-func (w *worker) schedulePending(ctx context.Context, taskExec *entity.TaskExecution, _ string) {
+// loadTaskExec materialize task execution into an in memory data structure, ready to be executed
+func (w *worker) loadTaskExec(ctx context.Context, taskExec *entity.TaskExecution, _ string) {
 	// if it's not pending
 	if taskExec.Status != entity.ExecutionStatusPending {
 		return
@@ -246,49 +246,54 @@ func (w *worker) schedulePending(ctx context.Context, taskExec *entity.TaskExecu
 	tq := timeQueue{taskExec.ScheduledRunAt, taskExec.QueueID}
 	var newTimeBucket bool
 
-	// initialize
-	func() {
-		defer w.timeBucketLock.Unlock()
-		w.timeBucketLock.Lock()
+	switch taskExec.ExecutionMode {
+	case entity.TaskExecutionModeImmediate:
+		q <- taskExecRuntime
+	case entity.TaskExecutionModeRecurring, entity.TaskExecutionModeScheduled:
+		// initialize
+		func() {
+			defer w.timeBucketLock.Unlock()
+			w.timeBucketLock.Lock()
 
-		if _, ok := w.timeBucket[tq]; !ok {
-			w.timeBucket[tq] = make([]*TaskExecutionRuntime, 0)
-			newTimeBucket = true
-		}
-		w.timeBucket[tq] = append(w.timeBucket[tq], taskExecRuntime)
-	}()
-
-	// log.Printf("worker: got task execution assignment updated event (%v)", mode)
-
-	if newTimeBucket {
-		executeAt := time.Until(tq.taskScheduledRunAt)
-
-		// TODO: choose what's best
-		if executeAt < -10*time.Second {
-			log.Println("worker: warn. stale task will not be executed")
-			return
-		} else if executeAt < 0 {
-			// immediately execued
-			executeAt = 0
-		}
-
-		time.AfterFunc(executeAt, func() {
-			var taskExecs []*TaskExecutionRuntime
-			func() {
-				defer w.timeBucketLock.Unlock()
-				w.timeBucketLock.Lock()
-				taskExecs = w.timeBucket[tq]
-			}()
-
-			for _, taskExec := range taskExecs {
-				if taskExec.ctx.Err() != nil {
-					// we will no longer execute
-					continue
-				}
-
-				q <- taskExec
+			if _, ok := w.timeBucket[tq]; !ok {
+				w.timeBucket[tq] = make([]*TaskExecutionRuntime, 0)
+				newTimeBucket = true
 			}
-		})
+			w.timeBucket[tq] = append(w.timeBucket[tq], taskExecRuntime)
+		}()
+
+		// log.Printf("worker: got task execution assignment updated event (%v)", mode)
+
+		if newTimeBucket {
+			executeAt := time.Until(tq.taskScheduledRunAt)
+
+			// TODO: choose what's best
+			if executeAt < -10*time.Second {
+				log.Println("worker: warn. stale task will not be executed")
+				return
+			} else if executeAt < 0 {
+				// immediately execued
+				executeAt = 0
+			}
+
+			time.AfterFunc(executeAt, func() {
+				var taskExecs []*TaskExecutionRuntime
+				func() {
+					defer w.timeBucketLock.Unlock()
+					w.timeBucketLock.Lock()
+					taskExecs = w.timeBucket[tq]
+				}()
+
+				for _, taskExec := range taskExecs {
+					if taskExec.ctx.Err() != nil {
+						// we will no longer execute
+						continue
+					}
+
+					q <- taskExec
+				}
+			})
+		}
 	}
 }
 

@@ -57,7 +57,7 @@ func (c *Client) Propose(ctx context.Context, request any) (any, error) {
 	case RequestRegenerateTaskInstances:
 		command = Command_Leader_GenerateRecurringTaskExecution
 	case CreateTaskExecution:
-		command = Command_Leader_CreateTaskExecution
+		command = Command_CreateTaskExecution
 	case UpdateTaskExecution:
 		command = Command_Worker_UpdateTaskExecution
 	case UpdateAvailability:

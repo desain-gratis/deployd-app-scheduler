@@ -1,11 +1,8 @@
 {
 	"namespace": "deployd",
-	"queue_id": "echoReverse()",
-
-	"input": "Hello, World!",
-
-	"execution_strategy": "IMMEDIATE",
-	"execution_strategy_input": {},
-
-	"user_time": "2026-10-08T15:04:05+07:00"
+	"queue_id": "sendInvoice()",
+	"input": {
+		"email": "keenan@example.com"
+	},
+	"user_time": "2026-10-24T19:00:00+07:00"
 }

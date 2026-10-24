@@ -20,6 +20,8 @@ func NewPooledQueue(ctx context.Context, client *genericjob.Client, count int, f
 		<-ctx.Done()
 	}()
 
+	// TODO: handle application close
+
 	for range count {
 		go func() {
 

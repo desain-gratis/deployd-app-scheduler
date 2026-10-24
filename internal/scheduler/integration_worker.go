@@ -2,6 +2,8 @@ package scheduler
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log"
 	"sync"
 	"time"
@@ -14,6 +16,11 @@ import (
 )
 
 const maxScheduledInstancePerTask = 100
+
+var (
+	ErrTaskExecutionCancelled  = errors.New("task execution cancelled")
+	ErrTaskExecutionReAssigned = errors.New("task execution reassigned")
+)
 
 type worker struct {
 	topic    notifier.Topic
@@ -124,18 +131,18 @@ func (w *worker) updateAvailability(ctx context.Context) {
 type TaskExecutionRuntime struct {
 	*entity.TaskExecution
 	ctx    context.Context
-	cancel func()
+	cancel context.CancelCauseFunc
 }
 
-func (t *TaskExecutionRuntime) Cancel() {
+func (t *TaskExecutionRuntime) Cancel(err error) {
 	if t == nil {
 		return
 	}
-	t.cancel()
+	t.cancel(err)
 }
 
 func (w *worker) cleanUp(taskExec *TaskExecutionRuntime) {
-	taskExec.Cancel()
+	taskExec.Cancel(fmt.Errorf("%w", ErrTaskExecutionCancelled))
 
 	if taskExec == nil {
 		return
@@ -184,13 +191,13 @@ func (w *worker) checkCancellation(_ context.Context, taskExec *entity.TaskExecu
 
 	// task has been re-queued
 	if taskExec.AssignmentStatus == nil {
-		prev.Cancel()
+		prev.Cancel(ErrTaskExecutionReAssigned)
 		return
 	}
 
 	// task no longer ours :(
 	if taskExec.AssignmentStatus.AssignedTo != w.client.ID() {
-		prev.Cancel()
+		prev.Cancel(ErrTaskExecutionReAssigned)
 		return
 	}
 
@@ -199,7 +206,7 @@ func (w *worker) checkCancellation(_ context.Context, taskExec *entity.TaskExecu
 	if taskExec.Status == entity.ExecutionStatusCancelled {
 		switch prev.Status {
 		case entity.ExecutionStatusInProgress, entity.ExecutionStatusPending:
-			prev.Cancel()
+			prev.Cancel(ErrTaskExecutionCancelled)
 		}
 		return
 	}
@@ -231,7 +238,7 @@ func (w *worker) loadTaskExec(ctx context.Context, taskExec *entity.TaskExecutio
 		return
 	}
 
-	ctx, cancel := context.WithCancel(ctx)
+	ctx, cancel := context.WithCancelCause(ctx)
 	taskExecRuntime := &TaskExecutionRuntime{
 		TaskExecution: taskExec, ctx: ctx, cancel: cancel,
 	}

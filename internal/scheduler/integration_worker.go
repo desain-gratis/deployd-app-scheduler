@@ -255,7 +255,10 @@ func (w *worker) loadTaskExec(ctx context.Context, taskExec *entity.TaskExecutio
 
 	switch taskExec.ExecutionMode {
 	case entity.TaskExecutionModeImmediate:
-		q <- taskExecRuntime
+		// TODO: maybe there is another better approach to queue immediate tasks
+		go func() {
+			q <- taskExecRuntime
+		}()
 	case entity.TaskExecutionModeRecurring, entity.TaskExecutionModeScheduled:
 		// initialize
 		func() {

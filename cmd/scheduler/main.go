@@ -91,7 +91,7 @@ func enableSchedulerModule(ctx context.Context, router *httprouter.Router) {
 	)
 	_ = worker.Init(ctx)
 
-	httpAPI := scheduler_integration.NewHttpAPI(topic, schedulerClient)
+	httpAPI := scheduler_integration.NewHttpAPI(topic, schedulerClient, taskExecutionUsecase)
 
 	err = schedulerRaft.Run(ctx, worker.OnBecomingRaftLeader)
 	if err != nil {
@@ -107,9 +107,12 @@ func enableSchedulerModule(ctx context.Context, router *httprouter.Router) {
 	taskExecutionHandler := mycontentapi.New(taskExecutionUsecase, publicBaseURL+"/task/instance", []string{"queue_id"})
 
 	router.GET("/hello", httpAPI.Hello)
-	router.POST("/task/recurring", httpAPI.CreateRecurringTask)
-	router.POST("/task", httpAPI.ExecuteTask)
 
-	router.GET("/task", recurringTaskHandler.Get)
-	router.GET("/task/instance", taskExecutionHandler.Get)
+	router.POST("/task/recurring", httpAPI.CreateRecurringTask)
+	router.GET("/task/recurring", recurringTaskHandler.Get)
+
+	// task meaning task execution
+	router.POST("/task", httpAPI.ExecuteTask)
+	router.POST("/task/cancel", httpAPI.CancelTaskExecution)
+	router.GET("/task", taskExecutionHandler.Get)
 }

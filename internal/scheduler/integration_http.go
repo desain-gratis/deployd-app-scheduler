@@ -2,11 +2,14 @@ package scheduler
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"time"
 
+	"github.com/desain-gratis/common/delivery/mycontent-api/mycontent"
+	mycontent_base "github.com/desain-gratis/common/delivery/mycontent-api/mycontent/base"
 	"github.com/desain-gratis/common/lib/notifier"
 	"github.com/desain-gratis/deployd-app-scheduler/internal/raft-app/scheduler"
 	"github.com/desain-gratis/deployd-app-scheduler/src/entity"
@@ -16,11 +19,12 @@ import (
 
 type httpAPI struct {
 	rc *scheduler.Client
+	te *mycontent_base.Handler[*entity.TaskExecution]
 }
 
 // or background process I guess
-func NewHttpAPI(topic notifier.Topic, rc *scheduler.Client) *httpAPI {
-	return &httpAPI{rc: rc}
+func NewHttpAPI(topic notifier.Topic, rc *scheduler.Client, te *mycontent_base.Handler[*entity.TaskExecution]) *httpAPI {
+	return &httpAPI{rc: rc, te: te}
 }
 
 func (h *httpAPI) Hello(w http.ResponseWriter, r *http.Request, p httprouter.Params) {
@@ -84,6 +88,68 @@ func (h *httpAPI) ExecuteTask(w http.ResponseWriter, r *http.Request, p httprout
 	}
 
 	w.WriteHeader(http.StatusCreated)
+	fmt.Fprint(w, string(resp))
+}
+
+func (h *httpAPI) CancelTaskExecution(w http.ResponseWriter, r *http.Request, p httprouter.Params) {
+	payload, err := io.ReadAll(r.Body)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		fmt.Fprintf(w, "WADUUH: %v", err)
+		return
+	}
+
+	var input entity.TaskExecution
+	err = json.Unmarshal(payload, &input)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		fmt.Fprintf(w, "WADUUH: %v", err)
+		return
+	}
+
+	taskExecs, err := h.te.Get(r.Context(), input.Namespace(), input.RefIDs(), input.ID())
+	if err != nil {
+		if errors.Is(err, mycontent.ErrNotFound) {
+			w.WriteHeader(http.StatusNotFound)
+			fmt.Fprintf(w, "WADUUH: %v", err)
+			return
+		}
+		w.WriteHeader(http.StatusInternalServerError)
+		fmt.Fprintf(w, "WADUUH: %v", err)
+		return
+	}
+
+	taskExec := taskExecs[0]
+
+	// client validation (raft will validate as well, this just to make it quicker)
+	switch taskExec.Status {
+	case entity.ExecutionStatusInProgress, entity.ExecutionStatusPending:
+	default:
+		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprintf(w, "invalid state: %v", err)
+		return
+	}
+
+	taskExec.Status = entity.ExecutionStatusCancelled
+
+	// server do something
+	data := scheduler.UpdateTaskExecution(taskExec)
+
+	result, err := h.rc.Propose(r.Context(), data)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		fmt.Fprintf(w, "XXX UWADUUH: %v %v", err, data)
+		return
+	}
+
+	resp, err := json.Marshal(result)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		fmt.Fprintf(w, "XXX UWADUUH: %v %v", err, data)
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
 	fmt.Fprint(w, string(resp))
 }
 

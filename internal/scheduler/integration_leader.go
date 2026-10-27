@@ -118,34 +118,50 @@ func (ls *leader) checkTaskExecutionAssignment(ctx context.Context) error {
 		return fmt.Errorf("leader: no healthy node")
 	}
 
-	taskExecs, err := ls.worker.taskExecutionStoreRO.Stream(ctx, "deployd", nil, "")
-	if err != nil {
-		return err
-	}
-
-	for taskExec := range taskExecs {
-		if taskExec.AssignmentState != nil {
-			if _, ok := healthyUIDs[taskExec.AssignmentState.AssignedTo]; ok {
+	// TODO: use the various method provided by teStorage for more efficient query
+	taskCh, errCh := ls.teStorageV2.GetAll(ctx, "deployd")
+	for taskCh != nil || errCh != nil {
+		select {
+		case task, ok := <-taskCh:
+			if !ok {
+				taskCh = nil
 				continue
 			}
-			// notice we don't do "upscale" if healthy node increase :)
-			// maybe manual rebalance later :)
-		} else {
-			taskExec.AssignmentState = &entity.AssignmentState{}
-		}
 
-		taskExec.AssignmentState.AssignedTo = healthyUID
-		taskExec.AssignmentState.AssignedBy = ls.client.ID()
-		taskExec.AssignmentState.AssignmentTime = time.Now()
-		taskExec.AssignmentState.AssignmentCount++
+			// Process task.
+			if task.AssignmentState != nil {
+				if _, ok := healthyUIDs[task.AssignmentState.AssignedTo]; ok {
+					continue
+				}
+				// notice we don't do "upscale" if healthy node increase :)
+				// maybe manual rebalance later :)
+			} else {
+				task.AssignmentState = &entity.AssignmentState{}
+			}
 
-		// TODO: use batch inside the raft to make it more efficient
-		// but it needed the allocation algorithm to be deterministic
-		// (eg. it will be the same accross all nodes)
-		_, err := ls.client.Propose(ctx, scheduler.UpdateTaskExecution(taskExec))
-		if err != nil {
-			// determien error, maybe panic or maybe just fail
-			log.Printf("failed to (re)assign work: %v", err)
+			task.AssignmentState.AssignedTo = healthyUID
+			task.AssignmentState.AssignedBy = ls.client.ID()
+			task.AssignmentState.AssignmentTime = time.Now()
+			task.AssignmentState.AssignmentCount++
+
+			// TODO: use batch inside the raft to make it more efficient
+			// but it needed the allocation algorithm to be deterministic
+			// (eg. it will be the same accross all nodes)
+			_, err := ls.client.Propose(ctx, scheduler.UpdateTaskExecution(task))
+			if err != nil {
+				// determien error, maybe panic or maybe just fail
+				log.Printf("failed to (re)assign work: %v", err)
+			}
+
+		case err, ok := <-errCh:
+			if !ok {
+				errCh = nil
+				continue
+			}
+
+			if err != nil {
+				log.Println("GetAll error:", err)
+			}
 		}
 	}
 

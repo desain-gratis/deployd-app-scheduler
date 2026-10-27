@@ -29,8 +29,7 @@ type worker struct {
 	namespace string
 
 	taskDefinitionStoreRO *mycontent_base.Handler[*entity.RecurringTask]
-	taskExecutionStoreRO  *mycontent_base.Handler[*entity.TaskExecution]
-
+	teStorageV2           scheduler.TaskExecutionStorage
 	// task IDs
 	scheduled     map[queueTaskPair]*TaskExecutionRuntime
 	scheduledLock *sync.Mutex
@@ -53,7 +52,7 @@ func NewWorker(
 	topic notifier.Topic,
 	client *scheduler.Client,
 	taskDefinitionStoreRO *mycontent_base.Handler[*entity.RecurringTask],
-	taskExecutionStoreRO *mycontent_base.Handler[*entity.TaskExecution],
+	teStorageV2 scheduler.TaskExecutionStorage,
 	queue map[string]chan *TaskExecutionRuntime,
 	assignmentUpdated chan *entity.TaskExecution,
 ) *worker {
@@ -61,7 +60,7 @@ func NewWorker(
 		topic:                 topic,
 		toLeader:              make(chan string),
 		taskDefinitionStoreRO: taskDefinitionStoreRO,
-		taskExecutionStoreRO:  taskExecutionStoreRO,
+		teStorageV2:           teStorageV2,
 		namespace:             namespace,
 		scheduled:             make(map[queueTaskPair]*TaskExecutionRuntime),
 		scheduledLock:         &sync.Mutex{},
@@ -77,13 +76,28 @@ func NewWorker(
 
 // Can be called after raft "snapshot" is ready, but before the raft is ran
 func (w *worker) Init(ctx context.Context) error {
-	allTask, err := w.taskExecutionStoreRO.Get(ctx, w.namespace, nil, "")
-	if err != nil {
-		return err
-	}
+	taskCh, errCh := w.teStorageV2.GetAll(ctx, "deployd")
+	for taskCh != nil || errCh != nil {
+		select {
+		case task, ok := <-taskCh:
+			if !ok {
+				taskCh = nil
+				continue
+			}
 
-	for _, taskExec := range allTask {
-		w.loadTaskExec(ctx, taskExec, "backfill")
+			// Process task.
+			w.loadTaskExec(ctx, task, "backfill")
+
+		case err, ok := <-errCh:
+			if !ok {
+				errCh = nil
+				continue
+			}
+
+			if err != nil {
+				log.Println("GetAll error:", err)
+			}
+		}
 	}
 
 	go func() {

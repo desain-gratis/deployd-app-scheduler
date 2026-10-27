@@ -69,10 +69,6 @@ func (m *scheduler) GetRecurringTaskStore() *mycontent_base.Handler[*entity.Recu
 	return m.scheduledTaskUsecase
 }
 
-func (m *scheduler) GetTaskExecutionStore() *mycontent_base.Handler[*entity.TaskExecution] {
-	return m.taskExecutionUsecase
-}
-
 func (m *scheduler) WriteSnapshot(writer io.Writer) (int, error) {
 	return fmt.Fprintf(writer, "\n\nTHIS IS MY SNAPSHOT~ %v\n\n", time.Now())
 }
@@ -118,13 +114,8 @@ func (m *scheduler) OnUpdateV2(ctx context.Context, entry raft.EntryV2) (any, er
 		}
 
 		t := (*entity.TaskExecution)(data)
-		result, err := m.taskExecutionUsecase.Post(ctx, t, nil)
-		if err != nil {
-			return nil, err
-		}
 
-		// experimental
-		_, err = m.taskExecutionUsecaseV2.Post(ctx, t, metadata{EventID: entry.Index})
+		result, err := m.taskExecutionUsecaseV2.Post(ctx, t, metadata{EventID: entry.Index})
 		if err != nil {
 			return nil, err
 		}
@@ -139,29 +130,17 @@ func (m *scheduler) OnUpdateV2(ctx context.Context, entry raft.EntryV2) (any, er
 		}
 
 		t := (*entity.TaskExecution)(data)
-		getData, err := m.taskExecutionUsecase.Get(ctx, t.Namespace(), t.RefIDs(), t.ID()) // simple check if it's found or not
+
+		// experimental chDB
+		getData, err := m.taskExecutionUsecaseV2.GetByID(ctx, t.Ns, t.QueueID, t.Id)
 		if err != nil {
 			return nil, err
 		}
-		if len(getData) != 1 {
+		if getData == nil {
 			return nil, fmt.Errorf("task execution does not exist")
 		}
 
-		// experimental chDB
-		// _, err = m.taskExecutionUsecaseV2.GetByID(ctx, t.Ns, t.QueueID, t.Id)
-		// if err != nil {
-		// 	return nil, err
-		// }
-
-		// TODO: can check difference
-
-		result, err := m.taskExecutionUsecase.Post(ctx, t, nil)
-		if err != nil {
-			return nil, err
-		}
-
-		// experimental chDB
-		_, err = m.taskExecutionUsecaseV2.Post(ctx, t, metadata{EventID: entry.Index})
+		result, err := m.taskExecutionUsecaseV2.Post(ctx, t, metadata{EventID: entry.Index})
 		if err != nil {
 			return nil, err
 		}

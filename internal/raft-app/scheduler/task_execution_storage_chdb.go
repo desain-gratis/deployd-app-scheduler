@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/desain-gratis/deployd-app-scheduler/src/entity"
 )
@@ -18,6 +19,12 @@ type teStorageChDB struct {
 func NewClickhouseTaskExecutionStorage(db *sql.DB) *teStorageChDB {
 	return &teStorageChDB{
 		db: db,
+	}
+}
+
+func (t *teStorageChDB) DGCompat() *teStorageDGAdapter {
+	return &teStorageDGAdapter{
+		teStorageChDB: t,
 	}
 }
 
@@ -41,7 +48,7 @@ func (t *teStorageChDB) Init(ctx context.Context) error {
 			execution_status         LowCardinality(String),
 			assignment_status        LowCardinality(String),
 			assignment_assigned_node UInt64,
-			data                     JSON
+			data                     String -- JSON type has serde problem in golang (failed to parse format)
 		)
 		ENGINE = MergeTree
 		ORDER BY (namespace, scheduled_run_at, queue_id);
@@ -58,10 +65,6 @@ func (t *teStorageChDB) Post(
 	te *entity.TaskExecution,
 	meta any,
 ) (*entity.TaskExecution, error) {
-	if te == nil {
-		return nil, fmt.Errorf("task execution is nil")
-	}
-
 	m, ok := meta.(metadata)
 	if !ok {
 		return nil, fmt.Errorf("invalid metadata type: %T", meta)
@@ -71,13 +74,15 @@ func (t *teStorageChDB) Post(
 		return nil, fmt.Errorf("scheduled_run_at must not be zero")
 	}
 
-	if te.AssignmentState == nil {
-		te.AssignmentState = &entity.AssignmentState{}
-	}
-
 	data, err := json.Marshal(te)
 	if err != nil {
 		return nil, err
+	}
+
+	// just for the query; no need on the serialization
+	// todo: maybe we can just put it up afterall..
+	if te.AssignmentState == nil {
+		te.AssignmentState = &entity.AssignmentState{}
 	}
 
 	query := `
@@ -126,24 +131,114 @@ func (t *teStorageChDB) GetByID(
 	namespace string,
 	queueID, id string,
 ) (*entity.TaskExecution, error) {
-	return nil, fmt.Errorf("not implemented")
+	query := `
+		SELECT toString(data)
+		FROM scheduler.task_execution
+		WHERE namespace = ?
+			AND queue_id = ?
+			AND id = ?
+		ORDER BY event_id DESC
+		LIMIT 1
+	`
+
+	var data string
+	err := t.db.QueryRowContext(
+		ctx,
+		query,
+		namespace,
+		queueID,
+		id,
+	).Scan(&data)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, fmt.Errorf(
+				"task execution not found: namespace=%s queue_id=%s id=%s",
+				namespace,
+				queueID,
+				id,
+			)
+		}
+		return nil, err
+	}
+
+	var te entity.TaskExecution
+	if err := json.Unmarshal([]byte(data), &te); err != nil {
+		return nil, fmt.Errorf("unmarshal task execution: %w", err)
+	}
+
+	return &te, nil
 }
 
 // GetAll reads the latest event for each task execution.
-func (t *teStorageChDB) GetAll(ctx context.Context) error {
+// TODO: a bit compliated, maybe can simplify
+func (t *teStorageChDB) GetAll(
+	ctx context.Context,
+	namespace string,
+) (chan *entity.TaskExecution, chan error) {
+	taskCh := make(chan *entity.TaskExecution)
+	errCh := make(chan error, 1)
+
+	go func() {
+		defer close(taskCh)
+		defer close(errCh)
+
+		query := `
+			SELECT toString(data) AS data
+			FROM
+			(
+				SELECT *
+				FROM scheduler.task_execution
+				WHERE namespace = ?
+				ORDER BY event_id DESC
+				LIMIT 1 BY namespace, queue_id, id
+			)
+			ORDER BY (namespace, scheduled_run_at, queue_id)
+		`
+
+		rows, err := t.db.QueryContext(ctx, query, namespace)
+		if err != nil {
+			errCh <- err
+			return
+		}
+		defer rows.Close()
+
+		for rows.Next() {
+			var data string
+
+			if err := rows.Scan(&data); err != nil {
+				errCh <- err
+				return
+			}
+
+			var te entity.TaskExecution
+			if err := json.Unmarshal([]byte(data), &te); err != nil {
+				errCh <- fmt.Errorf("unmarshal task execution: %w", err)
+				return
+			}
+
+			select {
+			case taskCh <- &te:
+			case <-ctx.Done():
+				errCh <- ctx.Err()
+				return
+			}
+		}
+
+		if err := rows.Err(); err != nil {
+			errCh <- err
+		}
+	}()
+
+	return taskCh, errCh
+}
+
+func (t *teStorageChDB) GetPendingTasksCount(
+	ctx context.Context,
+	assignedID uint64,
+	before time.Time,
+) (int, error) {
 	query := `
-		SELECT
-			event_id,
-			namespace,
-			queue_id,
-			id,
-			scheduled_run_at,
-			execution_mode,
-			user_location,
-			execution_status,
-			assignment_status,
-			assignment_assigned_node,
-			toString(data) AS data
+		SELECT count()
 		FROM
 		(
 			SELECT *
@@ -151,64 +246,22 @@ func (t *teStorageChDB) GetAll(ctx context.Context) error {
 			ORDER BY event_id DESC
 			LIMIT 1 BY namespace, queue_id, id
 		)
-		ORDER BY (namespace, scheduled_run_at, queue_id) -- for scheduled task execution, i think can use this;
-		-- we can always create another table to optimize
+		WHERE
+			assignment_assigned_node = ?
+			AND scheduled_run_at < ?
+			AND execution_status = 'PENDING'
 	`
 
-	rows, err := t.db.QueryContext(ctx, query)
+	var count uint64
+	err := t.db.QueryRowContext(
+		ctx,
+		query,
+		assignedID,
+		before.UTC(),
+	).Scan(&count)
 	if err != nil {
-		return err
-	}
-	defer rows.Close()
-
-	for rows.Next() {
-		var (
-			eventID          uint64
-			namespace        string
-			queueID          string
-			id               string
-			scheduledRunAt   sql.NullTime
-			executionMode    string
-			userLocation     string
-			executionStatus  string
-			assignmentStatus string
-			assignedNode     uint64
-			data             string
-		)
-
-		if err := rows.Scan(
-			&eventID,
-			&namespace,
-			&queueID,
-			&id,
-			&scheduledRunAt,
-			&executionMode,
-			&userLocation,
-			&executionStatus,
-			&assignmentStatus,
-			&assignedNode,
-			&data,
-		); err != nil {
-			return err
-		}
-
-		fmt.Printf(
-			"eventID=%d namespace=%s queueID=%s id=%s scheduledRunAt=%v "+
-				"executionMode=%s userLocation=%s executionStatus=%s "+
-				"assignmentStatus=%s assignedNode=%d data=%s\n",
-			eventID,
-			namespace,
-			queueID,
-			id,
-			scheduledRunAt,
-			executionMode,
-			userLocation,
-			executionStatus,
-			assignmentStatus,
-			assignedNode,
-			data,
-		)
+		return 0, err
 	}
 
-	return rows.Err()
+	return int(count), nil
 }

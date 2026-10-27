@@ -5,11 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"time"
 
 	"github.com/desain-gratis/common/delivery/mycontent-api/mycontent"
-	mycontent_base "github.com/desain-gratis/common/delivery/mycontent-api/mycontent/base"
 	"github.com/desain-gratis/common/lib/notifier"
 	"github.com/desain-gratis/deployd-app-scheduler/internal/raft-app/scheduler"
 	"github.com/desain-gratis/deployd-app-scheduler/src/entity"
@@ -19,23 +19,43 @@ import (
 
 type httpAPI struct {
 	rc *scheduler.Client
-	te *mycontent_base.Handler[*entity.TaskExecution]
 
 	tes scheduler.TaskExecutionStorage
 }
 
 // or background process I guess
-func NewHttpAPI(topic notifier.Topic, rc *scheduler.Client, te *mycontent_base.Handler[*entity.TaskExecution], tes scheduler.TaskExecutionStorage) *httpAPI {
-	return &httpAPI{rc: rc, te: te, tes: tes}
+func NewHttpAPI(topic notifier.Topic, rc *scheduler.Client, tes scheduler.TaskExecutionStorage) *httpAPI {
+	return &httpAPI{rc: rc, tes: tes}
 }
 
 func (h *httpAPI) Hello(w http.ResponseWriter, r *http.Request, p httprouter.Params) {
-	err := h.tes.GetAll(r.Context())
-	if err != nil {
-		fmt.Fprintf(w, "ERROR: %v", err)
-		return
+	taskCh, errCh := h.tes.GetAll(r.Context(), "deployd")
+	for taskCh != nil || errCh != nil {
+		select {
+		case task, ok := <-taskCh:
+			if !ok {
+				taskCh = nil
+				continue
+			}
+
+			// Process task.
+			result, err := json.Marshal(task)
+			if err != nil {
+				continue
+			}
+			fmt.Fprintln(w, string(result))
+
+		case err, ok := <-errCh:
+			if !ok {
+				errCh = nil
+				continue
+			}
+
+			if err != nil {
+				log.Println("GetAll error:", err)
+			}
+		}
 	}
-	fmt.Fprintf(w, "hmm")
 }
 
 func (h *httpAPI) ExecuteTask(w http.ResponseWriter, r *http.Request, p httprouter.Params) {
@@ -112,7 +132,7 @@ func (h *httpAPI) CancelTaskExecution(w http.ResponseWriter, r *http.Request, p 
 		return
 	}
 
-	taskExecs, err := h.te.Get(r.Context(), input.Namespace(), input.RefIDs(), input.ID())
+	taskExec, err := h.tes.GetByID(r.Context(), input.Ns, input.QueueID, input.Id)
 	if err != nil {
 		if errors.Is(err, mycontent.ErrNotFound) {
 			w.WriteHeader(http.StatusNotFound)
@@ -123,8 +143,6 @@ func (h *httpAPI) CancelTaskExecution(w http.ResponseWriter, r *http.Request, p 
 		fmt.Fprintf(w, "WADUUH: %v", err)
 		return
 	}
-
-	taskExec := taskExecs[0]
 
 	// client validation (raft will validate as well, this just to make it quicker)
 	switch taskExec.Status {

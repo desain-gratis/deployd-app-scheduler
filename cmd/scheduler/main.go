@@ -91,7 +91,7 @@ func enableSchedulerModule(ctx context.Context, router *httprouter.Router) {
 	}
 
 	recurringTaskUsecase := schedulerApp.GetRecurringTaskStore()
-	taskExecutionUsecase := schedulerApp.GetTaskExecutionStore()
+	taskExecutionUsecase := taskExecutionStorage.DGCompat()
 
 	worker := scheduler_integration.NewWorker(
 		namespace,
@@ -104,7 +104,7 @@ func enableSchedulerModule(ctx context.Context, router *httprouter.Router) {
 	)
 	_ = worker.Init(ctx)
 
-	httpAPI := scheduler_integration.NewHttpAPI(topic, schedulerClient, taskExecutionUsecase, taskExecutionStorage)
+	httpAPI := scheduler_integration.NewHttpAPI(topic, schedulerClient, taskExecutionStorage)
 
 	err = schedulerRaft.Run(ctx, worker.OnBecomingRaftLeader)
 	if err != nil {

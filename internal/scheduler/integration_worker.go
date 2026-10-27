@@ -190,13 +190,13 @@ func (w *worker) checkCancellation(_ context.Context, taskExec *entity.TaskExecu
 	}
 
 	// task has been re-queued
-	if taskExec.AssignmentStatus == nil {
+	if taskExec.AssignmentState == nil {
 		prev.Cancel(ErrTaskExecutionReAssigned)
 		return
 	}
 
 	// task no longer ours :(
-	if taskExec.AssignmentStatus.AssignedTo != w.client.ID() {
+	if taskExec.AssignmentState.AssignedTo != w.client.ID() {
 		prev.Cancel(ErrTaskExecutionReAssigned)
 		return
 	}
@@ -220,12 +220,12 @@ func (w *worker) loadTaskExec(ctx context.Context, taskExec *entity.TaskExecutio
 	}
 
 	// if it's not assigned
-	if taskExec.AssignmentStatus == nil {
+	if taskExec.AssignmentState == nil {
 		return
 	}
 
 	// if it's not our task
-	if taskExec.AssignmentStatus.AssignedTo != w.client.ID() {
+	if taskExec.AssignmentState.AssignedTo != w.client.ID() {
 		return
 	}
 

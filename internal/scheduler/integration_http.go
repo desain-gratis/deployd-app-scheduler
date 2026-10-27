@@ -20,15 +20,22 @@ import (
 type httpAPI struct {
 	rc *scheduler.Client
 	te *mycontent_base.Handler[*entity.TaskExecution]
+
+	tes scheduler.TaskExecutionStorage
 }
 
 // or background process I guess
-func NewHttpAPI(topic notifier.Topic, rc *scheduler.Client, te *mycontent_base.Handler[*entity.TaskExecution]) *httpAPI {
-	return &httpAPI{rc: rc, te: te}
+func NewHttpAPI(topic notifier.Topic, rc *scheduler.Client, te *mycontent_base.Handler[*entity.TaskExecution], tes scheduler.TaskExecutionStorage) *httpAPI {
+	return &httpAPI{rc: rc, te: te, tes: tes}
 }
 
 func (h *httpAPI) Hello(w http.ResponseWriter, r *http.Request, p httprouter.Params) {
-
+	err := h.tes.GetAll(r.Context())
+	if err != nil {
+		fmt.Fprintf(w, "ERROR: %v", err)
+		return
+	}
+	fmt.Fprintf(w, "hmm")
 }
 
 func (h *httpAPI) ExecuteTask(w http.ResponseWriter, r *http.Request, p httprouter.Params) {
@@ -62,12 +69,10 @@ func (h *httpAPI) ExecuteTask(w http.ResponseWriter, r *http.Request, p httprout
 		PublishedAt:    t0,
 
 		// overwrriten
-		AssignmentStatus: nil,
-		ActualRunAt:      nil,
-		CompletedAt:      nil,
-		Output:           nil,
-		RecurringTaskID:  nil,
-		URLx:             "",
+		AssignmentState: nil,
+		ExecutionState:  nil,
+		RecurringTaskID: nil,
+		URLx:            "",
 	}
 
 	// server do something

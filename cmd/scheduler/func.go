@@ -10,7 +10,7 @@ import (
 func sendInvoice(taskExec *scheduler_integration.TaskExecutionRuntime) error {
 	log.Printf("The task sendInvoice(): %v triggered! Scheduled run at %v with input: %v !", taskExec.Id, taskExec.ScheduledRunAt.Truncate(1*time.Second), taskExec.Input)
 
-	taskExec.Output = "BERHAZIL"
+	taskExec.ExecutionState.Output = "BERHAZIL"
 
 	return nil
 }
@@ -18,7 +18,8 @@ func sendInvoice(taskExec *scheduler_integration.TaskExecutionRuntime) error {
 func echoReverse(taskExec *scheduler_integration.TaskExecutionRuntime) error {
 	b, ok := taskExec.Input.(string)
 	if !ok {
-		taskExec.Output = "Not a byte"
+		taskExec.ExecutionState.Output = "Not a byte"
+
 		return nil
 	}
 
@@ -27,7 +28,7 @@ func echoReverse(taskExec *scheduler_integration.TaskExecutionRuntime) error {
 		runes[i], runes[j] = runes[j], runes[i]
 	}
 
-	taskExec.Output = string(runes)
+	taskExec.ExecutionState.Output = string(runes)
 
 	log.Printf("The task echoReverse(): triggered! result: %v", string(runes))
 

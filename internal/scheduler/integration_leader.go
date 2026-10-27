@@ -66,7 +66,7 @@ func (ls *leader) Handler(ctx context.Context, term, leaderID uint64) {
 				// TODO: refactor eg. assignTask pending
 				if taskExec.Status != entity.ExecutionStatusPending ||
 					taskExec.ExecutionMode != entity.TaskExecutionModeImmediate ||
-					taskExec.AssignmentStatus != nil {
+					taskExec.AssignmentState.AssignedTo != 0 { // TODO
 					continue
 				}
 
@@ -81,11 +81,11 @@ func (ls *leader) Handler(ctx context.Context, term, leaderID uint64) {
 					}
 				}
 
-				taskExec.AssignmentStatus = &entity.AssignmentState{}
-				taskExec.AssignmentStatus.AssignedTo = healthyUID
-				taskExec.AssignmentStatus.AssignedBy = ls.client.ID()
-				taskExec.AssignmentStatus.AssignmentTime = time.Now()
-				taskExec.AssignmentStatus.AssignmentCount++
+				taskExec.AssignmentState = &entity.AssignmentState{}
+				taskExec.AssignmentState.AssignedTo = healthyUID
+				taskExec.AssignmentState.AssignedBy = ls.client.ID()
+				taskExec.AssignmentState.AssignmentTime = time.Now()
+				taskExec.AssignmentState.AssignmentCount++
 
 				_, err := ls.client.Propose(ctx, scheduler.UpdateTaskExecution(taskExec))
 				if err != nil {
@@ -124,20 +124,20 @@ func (ls *leader) checkTaskExecutionAssignment(ctx context.Context) error {
 	}
 
 	for taskExec := range taskExecs {
-		if taskExec.AssignmentStatus != nil {
-			if _, ok := healthyUIDs[taskExec.AssignmentStatus.AssignedTo]; ok {
+		if taskExec.AssignmentState != nil {
+			if _, ok := healthyUIDs[taskExec.AssignmentState.AssignedTo]; ok {
 				continue
 			}
 			// notice we don't do "upscale" if healthy node increase :)
 			// maybe manual rebalance later :)
 		} else {
-			taskExec.AssignmentStatus = &entity.AssignmentState{}
+			taskExec.AssignmentState = &entity.AssignmentState{}
 		}
 
-		taskExec.AssignmentStatus.AssignedTo = healthyUID
-		taskExec.AssignmentStatus.AssignedBy = ls.client.ID()
-		taskExec.AssignmentStatus.AssignmentTime = time.Now()
-		taskExec.AssignmentStatus.AssignmentCount++
+		taskExec.AssignmentState.AssignedTo = healthyUID
+		taskExec.AssignmentState.AssignedBy = ls.client.ID()
+		taskExec.AssignmentState.AssignmentTime = time.Now()
+		taskExec.AssignmentState.AssignmentCount++
 
 		// TODO: use batch inside the raft to make it more efficient
 		// but it needed the allocation algorithm to be deterministic

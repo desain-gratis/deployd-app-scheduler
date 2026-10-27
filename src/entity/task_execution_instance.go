@@ -17,16 +17,15 @@ type TaskExecution struct {
 
 	QueueID string `json:"queue_id"`
 
-	ScheduledRunAt time.Time       `json:"scheduled_run_at"`
-	ActualRunAt    *time.Time      `json:"actual_run_at"`
-	CompletedAt    *time.Time      `json:"completed_at"`
-	UserTime       time.Time       `json:"user_time"`
+	Input          any       `json:"input,omitempty"`
+	ScheduledRunAt time.Time `json:"scheduled_run_at"`
+	UserTime       time.Time `json:"user_time"`
+
 	Status         ExecutionStatus `json:"status"`
+	ExecutionState *ExecutionState `json:"execution_state"`
 
-	Input  any `json:"input,omitempty"`
-	Output any `json:"output,omitempty"`
-
-	AssignmentStatus *AssignmentState `json:"assignment_status"`
+	AssignmentStatus AssignmentStatus `json:"assignment_status"`
+	AssignmentState  *AssignmentState `json:"assignment_state"`
 
 	ExecutionMode TaskExecutionMode `json:"execution_mode"` // todo: naming
 
@@ -34,6 +33,12 @@ type TaskExecution struct {
 
 	PublishedAt time.Time `json:"published_at"`
 	URLx        string    `json:"url"`
+}
+
+type ExecutionState struct {
+	ActualRunAt *time.Time `json:"actual_run_at"`
+	CompletedAt *time.Time `json:"completed_at"`
+	Output      any        `json:"output,omitempty"`
 }
 
 type TaskExecutionMode string
@@ -73,6 +78,14 @@ const (
 	ExecutionStatusCancelled   ExecutionStatus = "CANCELLED"
 	ExecutionStatusFailed      ExecutionStatus = "FAILED"
 	ExecutionStatusSucceed     ExecutionStatus = "SUCCEED"
+)
+
+// move to implementation
+type AssignmentStatus string
+
+const (
+	AssignmentStatusAssigned    AssignmentStatus = "ASSIGNED"
+	AssignmentStatusNotAssigned AssignmentStatus = "NOT_ASSIGNED"
 )
 
 func (a *TaskExecution) CreatedTime() time.Time {

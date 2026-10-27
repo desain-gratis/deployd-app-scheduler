@@ -33,6 +33,9 @@ type scheduler struct {
 	taskExecutionUsecase *mycontent_base.Handler[*entity.TaskExecution]
 
 	executor chan *entity.TaskExecution
+
+	// experiment use chDB
+	taskExecutionUsecaseV2 TaskExecutionStorage
 }
 
 type CommandWrapper struct {
@@ -44,7 +47,7 @@ type ApplyResult func() (any, error)
 
 var ErrRetryable = errors.New("retryable")
 
-func New(namespace string, topic notifier.Topic, dbJob *badger.DB, executor chan *entity.TaskExecution) *scheduler {
+func New(namespace string, topic notifier.Topic, dbJob *badger.DB, teStorageV2 TaskExecutionStorage, executor chan *entity.TaskExecution) *scheduler {
 	scheduledTaskStorage := content_badger.New(dbJob, TableRecurringTask, 0)
 	taskExecutionStorage := content_badger.NewAutoIncrement(dbJob, TableTaskExecution, 1) // refer to queue
 
@@ -52,11 +55,12 @@ func New(namespace string, topic notifier.Topic, dbJob *badger.DB, executor chan
 	taskExecutionUsecase := mycontent_base.New[*entity.TaskExecution](taskExecutionStorage)
 
 	return &scheduler{
-		namespace:            namespace,
-		topic:                topic,
-		scheduledTaskUsecase: scheduledTaskUsecase,
-		taskExecutionUsecase: taskExecutionUsecase,
-		executor:             executor,
+		namespace:              namespace,
+		topic:                  topic,
+		scheduledTaskUsecase:   scheduledTaskUsecase,
+		taskExecutionUsecase:   taskExecutionUsecase,
+		executor:               executor,
+		taskExecutionUsecaseV2: teStorageV2,
 	}
 }
 
@@ -119,6 +123,12 @@ func (m *scheduler) OnUpdateV2(ctx context.Context, entry raft.EntryV2) (any, er
 			return nil, err
 		}
 
+		// experimental
+		_, err = m.taskExecutionUsecaseV2.Post(ctx, t, metadata{EventID: entry.Index})
+		if err != nil {
+			return nil, err
+		}
+
 		m.topic.Broadcast(ctx, EventTaskExecutionCreated(data))
 
 		return result, nil
@@ -137,7 +147,21 @@ func (m *scheduler) OnUpdateV2(ctx context.Context, entry raft.EntryV2) (any, er
 			return nil, fmt.Errorf("task execution does not exist")
 		}
 
+		// experimental chDB
+		// _, err = m.taskExecutionUsecaseV2.GetByID(ctx, t.Ns, t.QueueID, t.Id)
+		// if err != nil {
+		// 	return nil, err
+		// }
+
+		// TODO: can check difference
+
 		result, err := m.taskExecutionUsecase.Post(ctx, t, nil)
+		if err != nil {
+			return nil, err
+		}
+
+		// experimental chDB
+		_, err = m.taskExecutionUsecaseV2.Post(ctx, t, metadata{EventID: entry.Index})
 		if err != nil {
 			return nil, err
 		}

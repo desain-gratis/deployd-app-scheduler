@@ -2,19 +2,21 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"os"
 	"os/signal"
 	"sync"
 
+	_ "github.com/chdb-io/chdb-go/chdb/driver"
+	mycontentapi "github.com/desain-gratis/common/delivery/mycontent-api"
+	notifier_impl "github.com/desain-gratis/common/lib/notifier/impl"
+	runneretcd "github.com/desain-gratis/common/lib/raft/runner-etcd"
 	"github.com/dgraph-io/badger/v4"
 	"github.com/julienschmidt/httprouter"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 
-	mycontentapi "github.com/desain-gratis/common/delivery/mycontent-api"
-	notifier_impl "github.com/desain-gratis/common/lib/notifier/impl"
-	runneretcd "github.com/desain-gratis/common/lib/raft/runner-etcd"
 	"github.com/desain-gratis/deployd-app-scheduler/internal/raft-app/scheduler"
 	scheduler_integration "github.com/desain-gratis/deployd-app-scheduler/internal/scheduler"
 	"github.com/desain-gratis/deployd-app-scheduler/src/entity"
@@ -53,7 +55,18 @@ func main() {
 }
 
 func enableSchedulerModule(ctx context.Context, router *httprouter.Router) {
-	db, err := badger.Open(badger.DefaultOptions("./tmp/scheduler.db"))
+	badgerDB, err := badger.Open(badger.DefaultOptions("./tmp/scheduler.db"))
+	if err != nil {
+		log.Fatal().Msgf("UHUY %v", err)
+	}
+
+	chDB, err := sql.Open("chdb", "session=/tmp/scheduler.chdb")
+	if err != nil {
+		log.Fatal().Msgf("UHUY %v", err)
+	}
+
+	taskExecutionStorage := scheduler.NewClickhouseTaskExecutionStorage(chDB)
+	err = taskExecutionStorage.Init(ctx)
 	if err != nil {
 		log.Fatal().Msgf("UHUY %v", err)
 	}
@@ -61,8 +74,8 @@ func enableSchedulerModule(ctx context.Context, router *httprouter.Router) {
 	topic := notifier_impl.NewStandardTopic()
 
 	namespace := "deployd"
-	executorCh := make(chan *entity.TaskExecution) // to sync schedule
-	schedulerApp := scheduler.New(namespace, topic, db, executorCh)
+	executorCh := make(chan *entity.TaskExecution) // to sync schedule - todo, might be no need anymore; since the separation now is clear
+	schedulerApp := scheduler.New(namespace, topic, badgerDB, taskExecutionStorage, executorCh)
 
 	schedulerRaft, _, err := runneretcd.RunWithConfig(ctx, os.Getenv("DEPLOYD_RAFT"), "scheduler", schedulerApp)
 	if err != nil {
@@ -91,7 +104,7 @@ func enableSchedulerModule(ctx context.Context, router *httprouter.Router) {
 	)
 	_ = worker.Init(ctx)
 
-	httpAPI := scheduler_integration.NewHttpAPI(topic, schedulerClient, taskExecutionUsecase)
+	httpAPI := scheduler_integration.NewHttpAPI(topic, schedulerClient, taskExecutionUsecase, taskExecutionStorage)
 
 	err = schedulerRaft.Run(ctx, worker.OnBecomingRaftLeader)
 	if err != nil {

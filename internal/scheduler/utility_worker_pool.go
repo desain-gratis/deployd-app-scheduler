@@ -29,8 +29,11 @@ func NewPooledQueue(ctx context.Context, client *genericjob.Client, count int, f
 			for taskExec := range queue {
 
 				runAt := time.Now().In(taskExec.UserTime.Location())
-				taskExec.ActualRunAt = &runAt
 				taskExec.Status = entity.ExecutionStatusInProgress
+
+				taskExec.ExecutionState = &entity.ExecutionState{
+					ActualRunAt: &runAt,
+				}
 
 				// update before
 				_, err := client.Propose(ctx, genericjob.UpdateTaskExecution(taskExec.TaskExecution))
@@ -39,7 +42,7 @@ func NewPooledQueue(ctx context.Context, client *genericjob.Client, count int, f
 					return
 				}
 
-				// FINALLY, ACTUAL FUNCTION TO EXECUTE
+				// TODO: limit mutation (later..)
 				err = fn(taskExec)
 
 				if err != nil {
@@ -49,7 +52,7 @@ func NewPooledQueue(ctx context.Context, client *genericjob.Client, count int, f
 				}
 
 				tComplete := time.Now().In(taskExec.UserTime.Location())
-				taskExec.CompletedAt = &tComplete
+				taskExec.ExecutionState.CompletedAt = &tComplete
 
 				// update after
 				_, err = client.Propose(ctx, genericjob.UpdateTaskExecution(taskExec.TaskExecution))

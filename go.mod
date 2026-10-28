@@ -2,12 +2,11 @@ module github.com/desain-gratis/deployd-app-scheduler
 
 go 1.26.0
 
-replace github.com/desain-gratis/common => ../common
+// replace github.com/desain-gratis/common => ../common
 
 require (
 	github.com/arcward/crong v0.0.0-20240827163849-4abe2a5262db
 	github.com/chdb-io/chdb-go v1.12.0
-	github.com/chdb-io/chdb-go/v2 v2.2.0
 	github.com/desain-gratis/common v0.0.0-20261022192459-6169143e2049
 	github.com/dgraph-io/badger/v4 v4.9.6
 	github.com/google/uuid v1.6.0

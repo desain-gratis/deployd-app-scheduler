@@ -36,12 +36,16 @@ type leader struct {
 
 // Main loop for leader
 func (ls *leader) Handler(ctx context.Context, term, leaderID uint64) {
+	_ = ls.periodicCheck(ctx)
 	for {
 		select {
 		// Check unhealthy, if so rebalance Recurring / pending tasks
 		case <-ls.ticker.C:
 			// check tasks that has empty assignment / unhealthy node
-			ls.checkTaskExecutionAssignment(ctx)
+			err := ls.periodicCheck(ctx)
+			if err != nil {
+				log.Printf("leader: error peridoc check: %v", err)
+			}
 		case msg := <-ls.subscription.Listen():
 			t := time.Now()
 
@@ -62,36 +66,19 @@ func (ls *leader) Handler(ctx context.Context, term, leaderID uint64) {
 			case scheduler.EventTaskExecutionCreated:
 				taskExec := (*entity.TaskExecution)(evt)
 
-				// handle immediate evt
-				// TODO: refactor eg. assignTask pending
-				if taskExec.Status != entity.ExecutionStatusPending ||
-					taskExec.ExecutionMode != entity.TaskExecutionModeImmediate ||
-					taskExec.AssignmentState.AssignedTo != 0 { // TODO
-					continue
-				}
-
 				healthyUIDs := map[uint64]struct{}{}
-				var healthyUID uint64
+				var anyHealthyUID uint64
 
 				// only available in leader
 				for nodeID, progress := range ls.raftNode.Status().Progress {
 					if progress.RecentActive {
 						healthyUIDs[nodeID] = struct{}{}
-						healthyUID = nodeID // TODO: for now just select the last
+						anyHealthyUID = nodeID // TODO: for now just select the last
 					}
 				}
 
-				taskExec.AssignmentState = &entity.AssignmentState{}
-				taskExec.AssignmentState.AssignedTo = healthyUID
-				taskExec.AssignmentState.AssignedBy = ls.client.ID()
-				taskExec.AssignmentState.AssignmentTime = time.Now()
-				taskExec.AssignmentState.AssignmentCount++
-
-				_, err := ls.client.Propose(ctx, scheduler.UpdateTaskExecution(taskExec))
-				if err != nil {
-					// determien error, maybe panic or maybe just fail
-					log.Printf("failed to (re)assign work: %v", err)
-				}
+				ls.assignPendingTask(ctx, anyHealthyUID, taskExec)
+				continue
 			default:
 				// log.Printf("Unknown job evt")
 			}
@@ -101,8 +88,30 @@ func (ls *leader) Handler(ctx context.Context, term, leaderID uint64) {
 	}
 }
 
+func (ls *leader) assignPendingTask(ctx context.Context, anyHealthyUID uint64, taskExec *entity.TaskExecution) {
+	// TODO: make pretty
+	if taskExec.Status != entity.ExecutionStatusPending ||
+		taskExec.ExecutionMode != entity.TaskExecutionModeImmediate ||
+		taskExec.AssignmentStatus == entity.AssignmentStatusAssigned {
+		return
+	}
+
+	taskExec.AssignmentState = &entity.AssignmentState{}
+	taskExec.AssignmentState.AssignedTo = anyHealthyUID
+	taskExec.AssignmentState.AssignedBy = ls.client.ID()
+	taskExec.AssignmentState.AssignmentTime = time.Now()
+	taskExec.AssignmentState.AssignmentCount++
+	taskExec.AssignmentStatus = entity.AssignmentStatusAssigned
+
+	_, err := ls.client.Propose(ctx, scheduler.UpdateTaskExecution(taskExec))
+	if err != nil {
+		// determien error, maybe panic or maybe just fail
+		log.Printf("failed to (re)assign work: %v", err)
+	}
+}
+
 // check for unhealthy and if found, re-assign task execution, notify worker
-func (ls *leader) checkTaskExecutionAssignment(ctx context.Context) error {
+func (ls *leader) periodicCheck(ctx context.Context) error {
 	healthyUIDs := map[uint64]struct{}{}
 	var healthyUID uint64
 
@@ -119,7 +128,7 @@ func (ls *leader) checkTaskExecutionAssignment(ctx context.Context) error {
 	}
 
 	// TODO: use the various method provided by teStorage for more efficient query
-	taskCh, errCh := ls.teStorageV2.GetAll(ctx, "deployd")
+	taskCh, errCh := ls.teStorageV2.GetAll(ctx, ls.namespace)
 	for taskCh != nil || errCh != nil {
 		select {
 		case task, ok := <-taskCh:
@@ -128,30 +137,10 @@ func (ls *leader) checkTaskExecutionAssignment(ctx context.Context) error {
 				continue
 			}
 
-			// Process task.
-			if task.AssignmentState != nil {
-				if _, ok := healthyUIDs[task.AssignmentState.AssignedTo]; ok {
-					continue
-				}
-				// notice we don't do "upscale" if healthy node increase :)
-				// maybe manual rebalance later :)
-			} else {
-				task.AssignmentState = &entity.AssignmentState{}
-			}
-
-			task.AssignmentState.AssignedTo = healthyUID
-			task.AssignmentState.AssignedBy = ls.client.ID()
-			task.AssignmentState.AssignmentTime = time.Now()
-			task.AssignmentState.AssignmentCount++
-
-			// TODO: use batch inside the raft to make it more efficient
-			// but it needed the allocation algorithm to be deterministic
-			// (eg. it will be the same accross all nodes)
-			_, err := ls.client.Propose(ctx, scheduler.UpdateTaskExecution(task))
-			if err != nil {
-				// determien error, maybe panic or maybe just fail
-				log.Printf("failed to (re)assign work: %v", err)
-			}
+			// if not healthy, reassign executor node to a healthy node
+			ls.reassignPendingTasks(ctx, healthyUIDs, healthyUID, task)
+			// for now: only check pending tasks, later need to check on progress & another state..
+			// we can handle rebalance and all others in another branch of this functino
 
 		case err, ok := <-errCh:
 			if !ok {
@@ -166,6 +155,38 @@ func (ls *leader) checkTaskExecutionAssignment(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+func (ls *leader) reassignPendingTasks(ctx context.Context, healthyUIDs map[uint64]struct{}, healthyUID uint64, task *entity.TaskExecution) {
+	if task.Status != entity.ExecutionStatusPending {
+		return
+	}
+
+	if task.AssignmentState != nil {
+		if _, ok := healthyUIDs[task.AssignmentState.AssignedTo]; ok {
+			// all g
+			return
+		}
+		// notice we don't do "upscale" if healthy node increase :)
+		// maybe manual rebalance later :)
+	} else {
+		task.AssignmentState = &entity.AssignmentState{}
+	}
+
+	task.AssignmentState.AssignedTo = healthyUID
+	task.AssignmentState.AssignedBy = ls.client.ID()
+	task.AssignmentState.AssignmentTime = time.Now().In(task.UserTime.Location())
+	task.AssignmentState.AssignmentCount++
+	task.AssignmentStatus = entity.AssignmentStatusAssigned
+
+	// TODO: use batch inside the raft to make it more efficient
+	// but it needed the allocation algorithm to be deterministic
+	// (eg. it will be the same accross all nodes)
+	_, err := ls.client.Propose(ctx, scheduler.UpdateTaskExecution(task))
+	if err != nil {
+		// determien error, maybe panic or maybe just fail
+		log.Printf("failed to (re)assign work: %v", err)
+	}
 }
 
 // schedule the task that is already in memory.
@@ -226,7 +247,7 @@ func (ls *leader) generateInstances(ctx context.Context, task *entity.RecurringT
 			QueueID:         task.QueueID,
 			ScheduledRunAt:  next,
 			Status:          status,
-			PublishedAt:     serverTime,
+			PublishedAt:     serverTime.In(task.UserTime.Location()),
 			Input:           task.Input,
 			UserTime:        task.UserTime,
 			ExecutionMode:   entity.TaskExecutionModeRecurring,

@@ -15,7 +15,7 @@ type TaskExecutionStorage interface {
 	GetByID(ctx context.Context, namespace string, queueID, id string) (*entity.TaskExecution, error)
 
 	// Get all task
-	GetAll(ctx context.Context, namespace string) (chan *entity.TaskExecution, chan error)
+	GetAll(ctx context.Context, indexes ...string) (chan *entity.TaskExecution, chan error)
 
 	// Get only pending tasks
 	GetPendingTasksCount(ctx context.Context, assignedID uint64, before time.Time) (int, error)

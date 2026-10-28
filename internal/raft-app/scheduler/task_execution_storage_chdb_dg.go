@@ -26,7 +26,18 @@ func (t *teStorageDGAdapter) Get(ctx context.Context, namespace string, refIDs [
 
 	result := make([]*entity.TaskExecution, 0)
 
-	taskCh, errCh := t.teStorageChDB.GetAll(ctx, namespace)
+	indexes := make([]string, 0, len(refIDs)+2)
+	if namespace != "" {
+		indexes = append(indexes, namespace)
+	}
+	if len(refIDs) > 0 {
+		indexes = append(indexes, refIDs...)
+	}
+	if ID != "" {
+		indexes = append(indexes, ID)
+	}
+
+	taskCh, errCh := t.teStorageChDB.GetAll(ctx, indexes...)
 	for taskCh != nil || errCh != nil {
 		select {
 		case task, ok := <-taskCh:

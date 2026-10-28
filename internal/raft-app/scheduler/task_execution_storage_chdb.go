@@ -39,19 +39,19 @@ func (t *teStorageChDB) Init(ctx context.Context) error {
 		CREATE TABLE IF NOT EXISTS scheduler.task_execution
 		(
 			event_id                 UInt64,
-			namespace                String,
-			queue_id                 String,
+			namespace                LowCardinality(String),
+			queue_id                 LowCardinality(String),
 			id                       String,
 			scheduled_run_at         DateTime64(1, 'UTC'),
 			execution_mode           LowCardinality(String),
-			user_location            String,
+			user_location            LowCardinality(String),
 			execution_status         LowCardinality(String),
 			assignment_status        LowCardinality(String),
 			assignment_assigned_node UInt64,
 			data                     String -- JSON type has serde problem in golang (failed to parse format)
 		)
 		ENGINE = MergeTree
-		ORDER BY (namespace, scheduled_run_at, queue_id);
+		ORDER BY (namespace, queue_id, scheduled_run_at);
 	`)
 	return err
 }
@@ -169,11 +169,16 @@ func (t *teStorageChDB) GetByID(
 	return &te, nil
 }
 
+var (
+	// indexColumn used to specify individual tasks
+	queryIndexColumn = []string{"namespace", "queue_id", "id"}
+)
+
 // GetAll reads the latest event for each task execution.
 // TODO: a bit compliated, maybe can simplify
 func (t *teStorageChDB) GetAll(
 	ctx context.Context,
-	namespace string,
+	indexes ...string,
 ) (chan *entity.TaskExecution, chan error) {
 	taskCh := make(chan *entity.TaskExecution)
 	errCh := make(chan error, 1)
@@ -182,20 +187,26 @@ func (t *teStorageChDB) GetAll(
 		defer close(taskCh)
 		defer close(errCh)
 
+		whereStatement, whereArgs, err := GenerateSQLWhere(queryIndexColumn, indexes...)
+		if err != nil {
+			errCh <- err
+			return
+		}
+
 		query := `
 			SELECT toString(data) AS data
 			FROM
 			(
 				SELECT *
 				FROM scheduler.task_execution
-				WHERE namespace = ?
+				` + whereStatement + `
 				ORDER BY event_id DESC
 				LIMIT 1 BY namespace, queue_id, id
 			)
-			ORDER BY (namespace, scheduled_run_at, queue_id)
+			ORDER BY (namespace, queue_id, scheduled_run_at)
 		`
 
-		rows, err := t.db.QueryContext(ctx, query, namespace)
+		rows, err := t.db.QueryContext(ctx, query, whereArgs...)
 		if err != nil {
 			errCh <- err
 			return

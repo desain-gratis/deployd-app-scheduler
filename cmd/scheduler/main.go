@@ -60,7 +60,7 @@ func enableSchedulerModule(ctx context.Context, router *httprouter.Router) {
 		log.Fatal().Msgf("UHUY %v", err)
 	}
 
-	chDB, err := sql.Open("chdb", "session=/tmp/scheduler.chdb")
+	chDB, err := sql.Open("chdb", "session=./tmp/scheduler.chdb")
 	if err != nil {
 		log.Fatal().Msgf("UHUY %v", err)
 	}

@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"log"
 	"strings"
 	"time"
 
@@ -117,7 +116,7 @@ func (t *teStorageChDB) Post(
 		)
 	`
 
-	t0 := time.Now()
+	// t0 := time.Now()
 
 	_, err = t.db.ExecContext(
 		ctx,
@@ -138,7 +137,7 @@ func (t *teStorageChDB) Post(
 		return nil, err
 	}
 
-	log.Printf("write time: %v ms", time.Since(t0).Milliseconds())
+	// log.Printf("write time: %v ms", time.Since(t0).Milliseconds())
 
 	return te, nil
 }

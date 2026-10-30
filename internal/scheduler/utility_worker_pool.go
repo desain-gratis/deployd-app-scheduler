@@ -38,7 +38,7 @@ func NewPooledQueue(ctx context.Context, client *genericjob.Client, count int, f
 				// update before
 				_, err := client.Propose(ctx, genericjob.UpdateTaskExecution(taskExec.TaskExecution))
 				if err != nil {
-					log.Printf("ERROR failed to update task execution instance: %v\n", err)
+					log.Printf("executor: failed to update task execution instance: %v\n", err)
 					return
 				}
 
@@ -55,10 +55,11 @@ func NewPooledQueue(ctx context.Context, client *genericjob.Client, count int, f
 				taskExec.ExecutionState.CompletedAt = &tComplete
 
 				// update after
+				// TODO: maybe make outside the raft.
 				_, err = client.Propose(ctx, genericjob.UpdateTaskExecution(taskExec.TaskExecution))
 				if err != nil {
 					// failed to inform cluster back. Leader's timeout mechanism will kick in.
-					log.Printf("ERROR failed to update task execution instance: %v\n", err)
+					log.Printf("executor: failed to update task execution instance: %v\n", err)
 					return
 				}
 			}

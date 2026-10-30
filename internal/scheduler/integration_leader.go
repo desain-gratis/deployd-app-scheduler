@@ -266,7 +266,7 @@ func (ls *leader) assignPendingTask(ctx context.Context, anyHealthyUID uint64, t
 	result, err := ls.client.Propose(ctx, scheduler.UpdateTaskExecution(taskExec))
 	if err != nil {
 		// determien error, maybe panic or maybe just fail
-		log.Printf("failed to (re)assign work: %v", err)
+		log.Printf("leader: failed to (re)assign work: %v", err)
 	}
 
 	_ = result

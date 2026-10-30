@@ -274,12 +274,15 @@ func (m *scheduler) generateRecurringTasks(ctx context.Context, entry raft.Entry
 			RecurringTaskID:  &task.Id,
 		}
 
+		// avoid blocking the raft, since this one is inside a loop
+		// instead of this, check root cause why slow
+		// go func(rt *entity.TaskExecution, idx uint64) {
 		result, err := m.taskExecutionUsecaseV2.Post(ctx, rt, metadata{EventID: entry.Index})
 		if err != nil {
-			return nil, err
+			log.Fatalf("raft: failed to create task execution: %v", err)
 		}
-
 		m.topic.Broadcast(ctx, EventTaskExecutionCreated(result))
+		// }(rt, entry.Index)
 
 		lastGeneratedEnd = t1
 	}

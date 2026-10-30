@@ -305,7 +305,11 @@ func (w *worker) loadTaskExec(ctx context.Context, taskExec *entity.TaskExecutio
 	case entity.TaskExecutionModeImmediate:
 		// TODO: maybe there is another better approach to queue immediate tasks
 		go func() {
-			q <- taskExecRuntime
+			select {
+			case q <- taskExecRuntime:
+			default:
+				log.Printf("worker: queue starting to get full~")
+			}
 		}()
 	case entity.TaskExecutionModeRecurring, entity.TaskExecutionModeScheduled:
 		// initialize
@@ -343,13 +347,17 @@ func (w *worker) loadTaskExec(ctx context.Context, taskExec *entity.TaskExecutio
 					taskExecs = w.timeBucket[tq]
 				}()
 
-				for _, taskExec := range taskExecs {
-					if taskExec.ctx.Err() != nil {
+				for _, taskExecRuntime := range taskExecs {
+					if taskExecRuntime.ctx.Err() != nil {
 						// we will no longer execute
 						continue
 					}
 
-					q <- taskExec
+					select {
+					case q <- taskExecRuntime:
+					default:
+						log.Printf("worker: queue starting to get full~")
+					}
 				}
 
 				// todo: delete the bucket

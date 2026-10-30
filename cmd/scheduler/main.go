@@ -8,7 +8,7 @@ import (
 	"os/signal"
 	"sync"
 
-	_ "github.com/chdb-io/chdb-go/chdb/driver"
+	_ "github.com/chdb-io/chdb-go/v2/chdb/driver"
 	mycontentapi "github.com/desain-gratis/common/delivery/mycontent-api"
 	notifier_impl "github.com/desain-gratis/common/lib/notifier/impl"
 	runneretcd "github.com/desain-gratis/common/lib/raft/runner-etcd"

@@ -238,10 +238,11 @@ func (m *scheduler) generateRecurringTasks(ctx context.Context, entry raft.Entry
 	execTimes := make([]time.Time, 0)
 
 	lastGeneratedEnd := t0
-	var generateIdx uint64
 
-	if task.State != nil {
-		generateIdx = task.State.GenerateIndex
+	if task.State == nil {
+		task.State = &entity.RecurringTaskState{
+			LastGenerateStart: t0,
+		}
 	}
 
 	// generate for one full year.., but limited to max task only if it's exceed one hour (since we need to schedule soon)
@@ -249,8 +250,9 @@ func (m *scheduler) generateRecurringTasks(ctx context.Context, entry raft.Entry
 	for next := schedule.Next(t0); next.Before(t1) && (count < maxScheduledInstancePerTask || next.Before(t0.Add(1*time.Hour))); next = schedule.Next(next) {
 		execTimes = append(execTimes, next)
 		count++
-		generateIdx++
-		execID := fmt.Sprintf("%v.%d", task.Id, generateIdx)
+
+		task.State.GenerateIndex++
+		execID := fmt.Sprintf("%v.%d", task.Id, task.State.GenerateIndex)
 
 		status := entity.ExecutionStatusPending
 		if !next.After(serverTime) {
@@ -285,10 +287,7 @@ func (m *scheduler) generateRecurringTasks(ctx context.Context, entry raft.Entry
 	// log.Printf("Scheduled %v task execution instance(s): %v. Updating the task.", count, execTimes)
 
 	// Update the task definition state
-	task.State = &entity.RecurringTaskState{
-		LastGenerateStart: t0,
-		LastGenerateEnd:   lastGeneratedEnd,
-	}
+	task.State.LastGenerateEnd = lastGeneratedEnd
 
 	updatedTask, err := m.scheduledTaskUsecase.Post(ctx, task, nil)
 	if err != nil {

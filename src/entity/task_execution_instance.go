@@ -84,8 +84,8 @@ const (
 type AssignmentStatus string
 
 const (
-	AssignmentStatusAssigned    AssignmentStatus = "ASSIGNED"
-	AssignmentStatusNotAssigned AssignmentStatus = ""
+	AssignmentStatusAssigned AssignmentStatus = "ASSIGNED"
+	AssignmentStatusPending  AssignmentStatus = "PENDING"
 )
 
 func (a *TaskExecution) CreatedTime() time.Time {

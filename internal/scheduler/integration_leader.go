@@ -36,16 +36,16 @@ type leader struct {
 
 // Main loop for leader
 func (ls *leader) Handler(ctx context.Context, term, leaderID uint64) {
-	_ = ls.periodicCheck(ctx)
+	_ = ls.periodicCheck(ctx, time.Now())
 	for {
 		select {
-		// Check unhealthy, if so rebalance Recurring / pending tasks
-		case <-ls.ticker.C:
+		case t := <-ls.ticker.C:
 			// check tasks that has empty assignment / unhealthy node
-			err := ls.periodicCheck(ctx)
+			err := ls.periodicCheck(ctx, t)
 			if err != nil {
-				log.Printf("leader: error peridoc check: %v", err)
+				log.Printf("leader: error during periodic check: %v", err)
 			}
+
 		case msg := <-ls.subscription.Listen():
 			t := time.Now()
 
@@ -77,8 +77,8 @@ func (ls *leader) Handler(ctx context.Context, term, leaderID uint64) {
 					}
 				}
 
-				ls.assignPendingTask(ctx, anyHealthyUID, taskExec)
-				continue
+				// whenever new task coming, we attempt to assign it to worker
+				ls.assignPendingTask(ctx, anyHealthyUID, taskExec, t)
 			default:
 				// log.Printf("Unknown job evt")
 			}
@@ -88,31 +88,10 @@ func (ls *leader) Handler(ctx context.Context, term, leaderID uint64) {
 	}
 }
 
-func (ls *leader) assignPendingTask(ctx context.Context, anyHealthyUID uint64, taskExec *entity.TaskExecution) {
-	// TODO: make pretty
-	if taskExec.Status != entity.ExecutionStatusPending ||
-		taskExec.ExecutionMode != entity.TaskExecutionModeImmediate ||
-		taskExec.AssignmentStatus == entity.AssignmentStatusAssigned {
-		return
-	}
-
-	taskExec.AssignmentState = &entity.AssignmentState{}
-	taskExec.AssignmentState.AssignedTo = anyHealthyUID
-	taskExec.AssignmentState.AssignedBy = ls.client.ID()
-	taskExec.AssignmentState.AssignmentTime = time.Now()
-	taskExec.AssignmentState.AssignmentCount++
-	taskExec.AssignmentStatus = entity.AssignmentStatusAssigned
-
-	_, err := ls.client.Propose(ctx, scheduler.UpdateTaskExecution(taskExec))
-	if err != nil {
-		// determien error, maybe panic or maybe just fail
-		log.Printf("failed to (re)assign work: %v", err)
-	}
-}
-
 // check for unhealthy and if found, re-assign task execution, notify worker
-func (ls *leader) periodicCheck(ctx context.Context) error {
+func (ls *leader) periodicCheck(ctx context.Context, t0 time.Time) error {
 	healthyUIDs := map[uint64]struct{}{}
+	unhealthyUIDs := make([]uint64, 0)
 	var healthyUID uint64
 
 	// only available in leader
@@ -120,6 +99,8 @@ func (ls *leader) periodicCheck(ctx context.Context) error {
 		if progress.RecentActive {
 			healthyUIDs[nodeID] = struct{}{}
 			healthyUID = nodeID // TODO: for now just select the last
+		} else {
+			unhealthyUIDs = append(unhealthyUIDs, nodeID)
 		}
 	}
 
@@ -127,8 +108,26 @@ func (ls *leader) periodicCheck(ctx context.Context) error {
 		return fmt.Errorf("leader: no healthy node")
 	}
 
-	// TODO: use the various method provided by teStorage for more efficient query
-	taskCh, errCh := ls.teStorageV2.GetAll(ctx, ls.namespace)
+	_ = ls.assignPendingTasks(ctx, healthyUID, t0)
+	_ = ls.reassignTasksFromUnhealthyNode(ctx, healthyUID, unhealthyUIDs, t0) // can be in different periodic tick
+
+	return nil
+}
+
+// Assign pending tasks to a worker.
+// Move pending task to another worker if detected unhealthy.
+func (ls *leader) assignPendingTasks(ctx context.Context, anyHealthyUID uint64, t0 time.Time) error {
+	// This is totally separate with worker code; we can use different value
+	// todo: replace the hardcoded value
+	before := t0.Add(3 * time.Hour)
+	notAssigned := entity.AssignmentStatusPending
+	filter := scheduler.TaskExecutionFilter{
+		Before:           &before,
+		ExecutionStatus:  []entity.ExecutionStatus{entity.ExecutionStatusPending},
+		AssignmentStatus: &notAssigned,
+	}
+
+	taskCh, errCh := ls.teStorageV2.GetAllWithFilter(ctx, filter, ls.namespace)
 	for taskCh != nil || errCh != nil {
 		select {
 		case task, ok := <-taskCh:
@@ -136,12 +135,7 @@ func (ls *leader) periodicCheck(ctx context.Context) error {
 				taskCh = nil
 				continue
 			}
-
-			// if not healthy, reassign executor node to a healthy node
-			ls.reassignPendingTasks(ctx, healthyUIDs, healthyUID, task)
-			// for now: only check pending tasks, later need to check on progress & another state..
-			// we can handle rebalance and all others in another branch of this functino
-
+			ls.assignPendingTask(ctx, anyHealthyUID, task, t0)
 		case err, ok := <-errCh:
 			if !ok {
 				errCh = nil
@@ -157,32 +151,74 @@ func (ls *leader) periodicCheck(ctx context.Context) error {
 	return nil
 }
 
-func (ls *leader) reassignPendingTasks(ctx context.Context, healthyUIDs map[uint64]struct{}, healthyUID uint64, task *entity.TaskExecution) {
-	if task.Status != entity.ExecutionStatusPending {
+func (ls *leader) reassignTasksFromUnhealthyNode(ctx context.Context, anyHealthyUID uint64, unhealthyUIDs []uint64, t0 time.Time) error {
+	if len(unhealthyUIDs) == 0 {
+		// no error
+		return nil
+	}
+
+	// This is totally separate with worker code. we can use different value
+	// todo: replace the hardcoded value
+	before := t0.Add(3 * time.Hour)
+	assigned := entity.AssignmentStatusAssigned
+	filter := scheduler.TaskExecutionFilter{
+		Before:           &before,
+		ExecutionStatus:  []entity.ExecutionStatus{entity.ExecutionStatusPending}, // Maybe check also the one in progress
+		AssignmentStatus: &assigned,
+		AssignedNode:     unhealthyUIDs,
+	}
+
+	taskCh, errCh := ls.teStorageV2.GetAllWithFilter(ctx, filter, ls.namespace)
+	for taskCh != nil || errCh != nil {
+		select {
+		case task, ok := <-taskCh:
+			if !ok {
+				taskCh = nil
+				continue
+			}
+
+			ls.assignPendingTask(ctx, anyHealthyUID, task, t0)
+		case err, ok := <-errCh:
+			if !ok {
+				errCh = nil
+				continue
+			}
+
+			if err != nil {
+				log.Println("GetAll error:", err)
+			}
+		}
+	}
+
+	return nil
+}
+
+// assignPendingTask
+// it can be called immediately during live request, or polled
+func (ls *leader) assignPendingTask(ctx context.Context, anyHealthyUID uint64, taskExec *entity.TaskExecution, t time.Time) {
+	// safeguard
+	// todo: maybe responsibility of the caller
+	if taskExec.Status != entity.ExecutionStatusPending {
 		return
 	}
 
-	if task.AssignmentState != nil {
-		if _, ok := healthyUIDs[task.AssignmentState.AssignedTo]; ok {
-			// all g
-			return
-		}
-		// notice we don't do "upscale" if healthy node increase :)
-		// maybe manual rebalance later :)
-	} else {
-		task.AssignmentState = &entity.AssignmentState{}
+	// if it's not immediate, we can assign to worker later
+	if taskExec.ExecutionMode != entity.TaskExecutionModeImmediate && taskExec.ScheduledRunAt.After(t.Add(3*time.Hour)) {
+		return
 	}
 
-	task.AssignmentState.AssignedTo = healthyUID
-	task.AssignmentState.AssignedBy = ls.client.ID()
-	task.AssignmentState.AssignmentTime = time.Now().In(task.UserTime.Location())
-	task.AssignmentState.AssignmentCount++
-	task.AssignmentStatus = entity.AssignmentStatusAssigned
+	// in case of re-assignment, it's possible taskExec already have previous assignment
+	if taskExec.AssignmentState == nil {
+		taskExec.AssignmentState = &entity.AssignmentState{}
+	}
 
-	// TODO: use batch inside the raft to make it more efficient
-	// but it needed the allocation algorithm to be deterministic
-	// (eg. it will be the same accross all nodes)
-	_, err := ls.client.Propose(ctx, scheduler.UpdateTaskExecution(task))
+	taskExec.AssignmentState.AssignedTo = anyHealthyUID
+	taskExec.AssignmentState.AssignedBy = ls.client.ID()
+	taskExec.AssignmentState.AssignmentTime = t
+	taskExec.AssignmentState.AssignmentCount++
+	taskExec.AssignmentStatus = entity.AssignmentStatusAssigned
+
+	_, err := ls.client.Propose(ctx, scheduler.UpdateTaskExecution(taskExec))
 	if err != nil {
 		// determien error, maybe panic or maybe just fail
 		log.Printf("failed to (re)assign work: %v", err)
@@ -242,16 +278,18 @@ func (ls *leader) generateInstances(ctx context.Context, task *entity.RecurringT
 		}
 
 		state := &entity.TaskExecution{
-			Ns:              task.Ns,
-			Id:              execID,
-			QueueID:         task.QueueID,
-			ScheduledRunAt:  next,
-			Status:          status,
-			PublishedAt:     serverTime.In(task.UserTime.Location()),
-			Input:           task.Input,
-			UserTime:        task.UserTime,
-			ExecutionMode:   entity.TaskExecutionModeRecurring,
-			RecurringTaskID: &task.Id,
+			Ns:               task.Ns,
+			Id:               execID,
+			QueueID:          task.QueueID,
+			ScheduledRunAt:   next,
+			Status:           status,
+			PublishedAt:      serverTime.In(task.UserTime.Location()),
+			Input:            task.Input,
+			UserTime:         task.UserTime,
+			ExecutionMode:    entity.TaskExecutionModeRecurring,
+			AssignmentStatus: entity.AssignmentStatusPending,
+			ExecutionState:   nil,
+			RecurringTaskID:  &task.Id,
 		}
 
 		_, err := ls.client.Propose(ctx, scheduler.CreateTaskExecution(state))

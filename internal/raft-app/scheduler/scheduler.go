@@ -6,8 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"time"
 
+	"github.com/arcward/crong"
 	mycontent_base "github.com/desain-gratis/common/delivery/mycontent-api/mycontent/base"
 	content_badger "github.com/desain-gratis/common/delivery/mycontent-api/storage/content/badger"
 	"github.com/desain-gratis/common/lib/notifier"
@@ -21,6 +23,8 @@ const (
 	TableRecurringTask = "recurring_task"
 	TableTaskExecution = "task_execution"
 )
+
+const maxScheduledInstancePerTask = 100
 
 var _ raft.ApplicationV2 = (*scheduler)(nil)
 var _ raft.ApplicationV2WithSnapshot = (*scheduler)(nil)
@@ -155,16 +159,23 @@ func (m *scheduler) OnUpdateV2(ctx context.Context, entry raft.EntryV2) (any, er
 			return nil, err
 		}
 
-		ch, err := m.scheduledTaskUsecase.Stream(ctx, m.namespace, data.RefIDs, data.ID)
+		rt, err := m.scheduledTaskUsecase.Get(ctx, data.Task.Namespace(), data.Task.RefIDs(), data.Task.ID())
 		if err != nil {
 			return nil, err
 		}
 
-		for task := range ch {
-			m.topic.Broadcast(ctx, EventRecurringTaskNeedRegenerate(task))
+		if len(rt) != 1 {
+			return nil, fmt.Errorf("requested recurring task is invalid")
 		}
 
-		return "SUCCESS", nil
+		task := rt[0]
+
+		t, err := m.generateRecurringTasks(ctx, entry, task, data.ServerTime)
+		if err != nil {
+			return nil, err
+		}
+
+		return t, nil
 	case Command_Worker_UpdateAvailability:
 		rw, err := parseAs[UpdateAvailability](cmd.Value)
 		if err != nil {
@@ -198,6 +209,94 @@ func (m *scheduler) userCreateTask(ctx context.Context, data CreateRecurringTask
 	}
 
 	return result, nil
+}
+
+func (m *scheduler) generateRecurringTasks(ctx context.Context, entry raft.EntryV2, task *entity.RecurringTask, serverTime time.Time) (*entity.RecurringTask, error) {
+	if task == nil {
+		return nil, fmt.Errorf("empty task definition")
+	}
+
+	if task.State != nil && task.State.LastGenerateEnd.After(serverTime.Add(-1*time.Minute)) { // arbitrary delta 1 minute
+		// WORKER SHOULD KNOW ABOUT THIS TIME, LET JUST SKIP
+		return task, nil
+	}
+
+	// generate between last generate end, and server time's next one hour
+
+	serverTime = serverTime.Truncate(1 * time.Second)
+
+	t0 := serverTime
+	t1 := serverTime.AddDate(1, 0, 0) // GENERATE FOR FULL YEAR (PLANNED)
+
+	loc := task.UserTime.Location() // schedule relative to Task's location / time zone
+	schedule, err := crong.New(task.Cron, loc)
+	if err != nil {
+		return nil, err
+	}
+
+	count := 0
+	execTimes := make([]time.Time, 0)
+
+	lastGeneratedEnd := t0
+	var generateIdx uint64
+
+	if task.State != nil {
+		generateIdx = task.State.GenerateIndex
+	}
+
+	// generate for one full year.., but limited to max task only if it's exceed one hour (since we need to schedule soon)
+
+	for next := schedule.Next(t0); next.Before(t1) && (count < maxScheduledInstancePerTask || next.Before(t0.Add(1*time.Hour))); next = schedule.Next(next) {
+		execTimes = append(execTimes, next)
+		count++
+		generateIdx++
+		execID := fmt.Sprintf("%v.%d", task.Id, generateIdx)
+
+		status := entity.ExecutionStatusPending
+		if !next.After(serverTime) {
+			status = entity.ExecutionStatusMissed // missed execution, we can ask user how to handle this using different strategies
+		}
+
+		rt := &entity.TaskExecution{
+			Ns:               task.Ns,
+			Id:               execID,
+			QueueID:          task.QueueID,
+			ScheduledRunAt:   next,
+			Status:           status,
+			PublishedAt:      serverTime.In(task.UserTime.Location()),
+			Input:            task.Input,
+			UserTime:         task.UserTime,
+			ExecutionMode:    entity.TaskExecutionModeRecurring,
+			AssignmentStatus: entity.AssignmentStatusPending,
+			ExecutionState:   nil,
+			RecurringTaskID:  &task.Id,
+		}
+
+		result, err := m.taskExecutionUsecaseV2.Post(ctx, rt, metadata{EventID: entry.Index})
+		if err != nil {
+			return nil, err
+		}
+
+		m.topic.Broadcast(ctx, EventTaskExecutionCreated(result))
+
+		lastGeneratedEnd = t1
+	}
+
+	// log.Printf("Scheduled %v task execution instance(s): %v. Updating the task.", count, execTimes)
+
+	// Update the task definition state
+	task.State = &entity.RecurringTaskState{
+		LastGenerateStart: t0,
+		LastGenerateEnd:   lastGeneratedEnd,
+	}
+
+	updatedTask, err := m.scheduledTaskUsecase.Post(ctx, task, nil)
+	if err != nil {
+		log.Printf("ERROR update task %v", err)
+		return nil, err
+	}
+
+	return updatedTask, nil
 }
 
 func parseAs[T any](payload json.RawMessage) (T, error) {

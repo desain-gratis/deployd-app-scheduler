@@ -44,6 +44,7 @@ type RecurringTaskState struct {
 	// for scheduled tasks
 	LastGenerateStart time.Time `json:"last_generate_start"`
 	LastGenerateEnd   time.Time `json:"last_generate_end"`
+	GenerateIndex     uint64    `json:"generate_index"`
 }
 
 func (a *RecurringTask) CreatedTime() time.Time {

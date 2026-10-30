@@ -39,8 +39,8 @@ type CreateRecurringTask struct {
 type UpdateRecurringTask CreateRecurringTask
 
 type RequestRegenerateTaskInstances struct {
-	RefIDs []string
-	ID     string
+	Task       *entity.RecurringTask
+	ServerTime time.Time
 }
 
 // TaskExecution Instance

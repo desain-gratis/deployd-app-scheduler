@@ -193,6 +193,7 @@ func (h *httpAPI) CreateRecurringTask(w http.ResponseWriter, r *http.Request, p 
 	}
 
 	taskDefinition.Id = uuid.NewString()
+	taskDefinition.PublishedAt = time.Now().In(taskDefinition.UserTime.Location())
 
 	// server do something
 	data := scheduler.CreateRecurringTask{

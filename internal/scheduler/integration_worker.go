@@ -15,8 +15,6 @@ import (
 	"github.com/desain-gratis/deployd-app-scheduler/src/entity"
 )
 
-const maxScheduledInstancePerTask = 100
-
 var (
 	ErrTaskExecutionCancelled  = errors.New("task execution cancelled")
 	ErrTaskExecutionReAssigned = errors.New("task execution reassigned")

@@ -7,9 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/arcward/crong"
 	"github.com/desain-gratis/common/lib/notifier"
-	"github.com/google/uuid"
 	"go.etcd.io/raft/v3"
 
 	"github.com/desain-gratis/deployd-app-scheduler/internal/raft-app/scheduler"
@@ -37,6 +35,30 @@ type leader struct {
 // Main loop for leader
 func (ls *leader) Handler(ctx context.Context, term, leaderID uint64) {
 	_ = ls.periodicCheck(ctx, time.Now())
+
+	// todo: refactor
+	regenerate := make(chan *entity.RecurringTask)
+
+	// todo pt in function
+	allRecurringTasks, err := ls.taskDefinitionStoreRO.Get(ctx, ls.namespace, nil, "")
+	if err != nil {
+		return
+	}
+	for _, rt := range allRecurringTasks {
+		if rt.State == nil {
+			// warning!
+			continue
+		}
+
+		_ = time.AfterFunc(time.Until(rt.State.LastGenerateEnd), func() {
+			if ctx.Err() != nil {
+				return
+			}
+
+			regenerate <- rt
+		})
+	}
+
 	for {
 		select {
 		case t := <-ls.ticker.C:
@@ -45,6 +67,29 @@ func (ls *leader) Handler(ctx context.Context, term, leaderID uint64) {
 			if err != nil {
 				log.Printf("leader: error during periodic check: %v", err)
 			}
+
+		case task := <-regenerate:
+			updatedTaskAny, err := ls.client.Propose(ctx, scheduler.RequestRegenerateTaskInstances{
+				Task:       task,
+				ServerTime: time.Now(),
+			})
+			if err != nil {
+				log.Printf("leader: err creating scheduled task execution instances %v", err)
+				continue
+			}
+
+			updatedTask, ok := updatedTaskAny.(*entity.RecurringTask)
+			if !ok {
+				log.Printf("leader: not a recurring task")
+			}
+
+			_ = time.AfterFunc(time.Until(updatedTask.State.LastGenerateEnd), func() {
+				if ctx.Err() != nil {
+					return
+				}
+
+				regenerate <- updatedTask
+			})
 
 		case msg := <-ls.subscription.Listen():
 			t := time.Now()
@@ -55,14 +100,14 @@ func (ls *leader) Handler(ctx context.Context, term, leaderID uint64) {
 				task := getTask(evt)
 				if task == nil {
 					// TODO: error inside the raft app, can check which causes empty event
+					log.Printf("leader: lah task nya nil")
 					continue
 				}
 
-				err := ls.generateInstances(ctx, task, t)
-				if err != nil {
-					log.Printf("leader: err creating scheduled task execution instances %v", err)
-					continue
-				}
+				go func() {
+					regenerate <- task
+				}()
+
 			case scheduler.EventTaskExecutionCreated:
 				taskExec := (*entity.TaskExecution)(evt)
 
@@ -218,126 +263,11 @@ func (ls *leader) assignPendingTask(ctx context.Context, anyHealthyUID uint64, t
 	taskExec.AssignmentState.AssignmentCount++
 	taskExec.AssignmentStatus = entity.AssignmentStatusAssigned
 
-	_, err := ls.client.Propose(ctx, scheduler.UpdateTaskExecution(taskExec))
+	result, err := ls.client.Propose(ctx, scheduler.UpdateTaskExecution(taskExec))
 	if err != nil {
 		// determien error, maybe panic or maybe just fail
 		log.Printf("failed to (re)assign work: %v", err)
 	}
-}
 
-// schedule the task that is already in memory.
-// currentTime usually same as t0
-func (ls *leader) generateInstances(ctx context.Context, task *entity.RecurringTask, serverTime time.Time) error {
-
-	// TODO SUPER: right now we implement the scheduled task first.
-	// need to switch case based on strategy later ~
-
-	if task == nil {
-		return fmt.Errorf("empty task definition")
-	}
-
-	if task.State != nil && task.State.LastGenerateEnd.After(serverTime.Add(-1*time.Minute)) { // arbitrary delta 1 minute
-		// no need to regenerate.
-		// just create the next trigger when to generate
-		err := ls.scheduleNextGenerate(ctx, time.Until(task.State.LastGenerateEnd), task)
-		if err != nil {
-			return err
-		}
-
-		return nil
-	}
-
-	// generate between last generate end, and server time's next one hour
-
-	serverTime = serverTime.Truncate(1 * time.Second)
-
-	t0 := serverTime
-	t1 := serverTime.AddDate(1, 0, 0) // GENERATE FOR FULL YEAR (PLANNED)
-
-	loc := task.UserTime.Location() // schedule relative to Task's location / time zone
-	schedule, err := crong.New(task.Cron, loc)
-	if err != nil {
-		return err
-	}
-
-	count := 0
-	execTimes := make([]time.Time, 0)
-
-	lastGeneratedEnd := t0
-
-	// generate for one full year.., but limited to max task only if it's exceed one hour (since we need to schedule soon)
-
-	for next := schedule.Next(t0); next.Before(t1) && (count < maxScheduledInstancePerTask || next.Before(t0.Add(1*time.Hour))); next = schedule.Next(next) {
-		execTimes = append(execTimes, next)
-		count++
-		execID := uuid.NewString()
-
-		status := entity.ExecutionStatusPending
-		if !next.After(serverTime) {
-			status = entity.ExecutionStatusMissed // missed execution, we can ask user how to handle this using different strategies
-		}
-
-		state := &entity.TaskExecution{
-			Ns:               task.Ns,
-			Id:               execID,
-			QueueID:          task.QueueID,
-			ScheduledRunAt:   next,
-			Status:           status,
-			PublishedAt:      serverTime.In(task.UserTime.Location()),
-			Input:            task.Input,
-			UserTime:         task.UserTime,
-			ExecutionMode:    entity.TaskExecutionModeRecurring,
-			AssignmentStatus: entity.AssignmentStatusPending,
-			ExecutionState:   nil,
-			RecurringTaskID:  &task.Id,
-		}
-
-		_, err := ls.client.Propose(ctx, scheduler.CreateTaskExecution(state))
-		if err != nil {
-			log.Printf("ERROR create task execution instance: %v\n", err)
-			continue
-		}
-
-		lastGeneratedEnd = t1
-	}
-
-	log.Printf("Scheduled %v task execution instance(s): %v. Updating the task.", count, execTimes)
-
-	// Update the task definition state
-	task.State = &entity.RecurringTaskState{
-		LastGenerateStart: t0,
-		LastGenerateEnd:   lastGeneratedEnd,
-	}
-
-	result, err := ls.client.Propose(ctx, scheduler.UpdateRecurringTask{
-		Task:       *task,
-		ServerTime: serverTime,
-	})
-	if err != nil {
-		log.Printf("ERROR update task %v", err)
-		return err
-	}
-
-	err = ls.scheduleNextGenerate(ctx, time.Until(t1), task)
-	if err != nil {
-		return err
-	}
-
-	log.Printf("Task scheduled: %+v", result)
-
-	return nil
-}
-
-func (ls *leader) scheduleNextGenerate(ctx context.Context, t time.Duration, task *entity.RecurringTask) error {
-	// Schedule for next generate trigger for this task
-	_ = time.AfterFunc(t, func() {
-		// to trigger the tick
-		_, err := ls.client.Propose(ctx, scheduler.RequestRegenerateTaskInstances{RefIDs: task.RefIDs(), ID: task.ID()})
-		if err != nil {
-			log.Printf("Error scheduling next generate time")
-			return
-		}
-	})
-
-	return nil
+	_ = result
 }

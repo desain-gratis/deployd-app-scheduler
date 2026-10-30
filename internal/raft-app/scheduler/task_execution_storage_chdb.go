@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/desain-gratis/deployd-app-scheduler/src/entity"
@@ -15,6 +16,22 @@ var _ TaskExecutionStorage = (*teStorageChDB)(nil)
 type teStorageChDB struct {
 	db *sql.DB
 }
+
+type metadata struct {
+	EventID uint64
+}
+
+type TaskExecutionFilter struct {
+	Before           *time.Time
+	AssignmentStatus *entity.AssignmentStatus
+	ExecutionStatus  []entity.ExecutionStatus
+	AssignedNode     []uint64
+}
+
+var (
+	// indexColumn used to specify individual tasks
+	queryIndexColumn = []string{"namespace", "queue_id", "id"}
+)
 
 func NewClickhouseTaskExecutionStorage(db *sql.DB) *teStorageChDB {
 	return &teStorageChDB{
@@ -54,10 +71,6 @@ func (t *teStorageChDB) Init(ctx context.Context) error {
 		ORDER BY (namespace, queue_id, scheduled_run_at);
 	`)
 	return err
-}
-
-type metadata struct {
-	EventID uint64
 }
 
 func (t *teStorageChDB) Post(
@@ -169,15 +182,20 @@ func (t *teStorageChDB) GetByID(
 	return &te, nil
 }
 
-var (
-	// indexColumn used to specify individual tasks
-	queryIndexColumn = []string{"namespace", "queue_id", "id"}
-)
-
 // GetAll reads the latest event for each task execution.
-// TODO: a bit compliated, maybe can simplify
 func (t *teStorageChDB) GetAll(
 	ctx context.Context,
+	indexes ...string,
+) (chan *entity.TaskExecution, chan error) {
+	return t.GetAllWithFilter(ctx, TaskExecutionFilter{}, indexes...)
+}
+
+// GetAllWithFilter reads the latest event for each task execution,
+// optionally filtering by scheduled time, execution status, assignment status,
+// and assigned node.
+func (t *teStorageChDB) GetAllWithFilter(
+	ctx context.Context,
+	filter TaskExecutionFilter,
 	indexes ...string,
 ) (chan *entity.TaskExecution, chan error) {
 	taskCh := make(chan *entity.TaskExecution)
@@ -203,8 +221,40 @@ func (t *teStorageChDB) GetAll(
 				ORDER BY event_id DESC
 				LIMIT 1 BY namespace, queue_id, id
 			)
-			ORDER BY (namespace, queue_id, scheduled_run_at)
+			WHERE 1 = 1
 		`
+
+		if filter.Before != nil {
+			query += " AND scheduled_run_at < ?"
+			whereArgs = append(whereArgs, filter.Before.UTC())
+		}
+
+		if len(filter.ExecutionStatus) > 0 {
+			query += " AND execution_status IN (" +
+				strings.TrimSuffix(strings.Repeat("?,", len(filter.ExecutionStatus)), ",") +
+				")"
+
+			for _, status := range filter.ExecutionStatus {
+				whereArgs = append(whereArgs, string(status))
+			}
+		}
+
+		if filter.AssignmentStatus != nil {
+			query += " AND assignment_status = ?"
+			whereArgs = append(whereArgs, string(*filter.AssignmentStatus))
+		}
+
+		if len(filter.AssignedNode) > 0 {
+			query += " AND assignment_assigned_node IN (" +
+				strings.TrimSuffix(strings.Repeat("?,", len(filter.AssignedNode)), ",") +
+				")"
+
+			for _, nodeID := range filter.AssignedNode {
+				whereArgs = append(whereArgs, nodeID)
+			}
+		}
+
+		query += " ORDER BY (namespace, queue_id, scheduled_run_at)"
 
 		rows, err := t.db.QueryContext(ctx, query, whereArgs...)
 		if err != nil {

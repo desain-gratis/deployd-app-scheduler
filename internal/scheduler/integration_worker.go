@@ -74,9 +74,19 @@ func NewWorker(
 	return w
 }
 
-// Can be called after raft "snapshot" is ready, but before the raft is ran
-func (w *worker) Init(ctx context.Context) error {
-	taskCh, errCh := w.teStorageV2.GetAll(ctx, "deployd")
+func (w *worker) loadPendingTask(ctx context.Context, t0 time.Time) {
+	// TODO: refactor
+	// only load task that will be executed in the next 3 hour
+	before := t0.Add(3 * time.Hour)
+	assigned := entity.AssignmentStatusAssigned
+	nodeID := w.client.ID()
+	filter := scheduler.TaskExecutionFilter{
+		Before:           &before,
+		ExecutionStatus:  []entity.ExecutionStatus{entity.ExecutionStatusPending},
+		AssignmentStatus: &assigned,
+		AssignedNode:     []uint64{nodeID},
+	}
+	taskCh, errCh := w.teStorageV2.GetAllWithFilter(ctx, filter, "deployd")
 	for taskCh != nil || errCh != nil {
 		select {
 		case task, ok := <-taskCh:
@@ -99,11 +109,21 @@ func (w *worker) Init(ctx context.Context) error {
 			}
 		}
 	}
+}
 
+// Can be called after raft "snapshot" is ready, but before the raft is ran
+func (w *worker) Init(ctx context.Context) error {
+	w.loadPendingTask(ctx, time.Now())
+
+	poll := time.NewTicker(30 * time.Second)
 	go func() {
+		defer poll.Stop()
+
 		for {
 			select {
 			case <-ctx.Done():
+			case t := <-poll.C:
+				w.loadPendingTask(ctx, t)
 			case taskExec := <-w.assignmentUpdated:
 				w.checkCancellation(ctx, taskExec)
 				w.loadTaskExec(ctx, taskExec, "live")
@@ -243,12 +263,28 @@ func (w *worker) loadTaskExec(ctx context.Context, taskExec *entity.TaskExecutio
 		return
 	}
 
-	// TODO: only materialize task execution within the next x hours
+	if taskExec.ScheduledRunAt.After(time.Now().Add(3 * time.Hour)) {
+		// to soon to load
+		// use the polling mechanism later
+		log.Printf("the task %v is past 3 hours from now (%v), I'll schedule it later.", taskExec.Id, taskExec.ScheduledRunAt)
+		return
+	}
 
 	// if the queue no longer found
 	q, ok := w.queue[taskExec.QueueID]
 	if !ok {
 		log.Printf("warn: queue %v not found in this node", taskExec.QueueID)
+		return
+	}
+
+	var isLoadedAlready bool
+	func() {
+		defer w.scheduledLock.Unlock()
+		w.scheduledLock.Lock()
+		_, isLoadedAlready = w.scheduled[queueTaskPair{taskExec.QueueID, taskExec.Id}]
+	}()
+	if isLoadedAlready {
+		// we already hold the task in memory
 		return
 	}
 
@@ -293,10 +329,11 @@ func (w *worker) loadTaskExec(ctx context.Context, taskExec *entity.TaskExecutio
 
 			// TODO: choose what's best
 			if executeAt < -10*time.Second {
+				// in hope server already re-assign
 				log.Println("worker: warn. stale task will not be executed")
 				return
 			} else if executeAt < 0 {
-				// immediately execued
+				// immediately executed
 				executeAt = 0
 			}
 
@@ -316,6 +353,8 @@ func (w *worker) loadTaskExec(ctx context.Context, taskExec *entity.TaskExecutio
 
 					q <- taskExec
 				}
+
+				// todo: delete the bucket
 			})
 		}
 	}

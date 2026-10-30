@@ -17,6 +17,13 @@ type TaskExecutionStorage interface {
 	// Get all task
 	GetAll(ctx context.Context, indexes ...string) (chan *entity.TaskExecution, chan error)
 
+	// Get all task with specified filter
+	GetAllWithFilter(
+		ctx context.Context,
+		filter TaskExecutionFilter,
+		indexes ...string,
+	) (chan *entity.TaskExecution, chan error)
+
 	// Get only pending tasks
 	GetPendingTasksCount(ctx context.Context, assignedID uint64, before time.Time) (int, error)
 }

@@ -31,6 +31,8 @@ type TaskExecution struct {
 
 	RecurringTaskID *string `json:"recurring_task_id"`
 
+	CancelReason *string `json:"cancel_reason,omitempty"`
+
 	PublishedAt time.Time `json:"published_at"`
 	URLx        string    `json:"url"`
 }

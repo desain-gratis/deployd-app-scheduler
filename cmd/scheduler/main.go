@@ -123,6 +123,7 @@ func enableSchedulerModule(ctx context.Context, router *httprouter.Router) {
 
 	router.POST("/task/recurring", httpAPI.CreateRecurringTask)
 	router.GET("/task/recurring", recurringTaskHandler.Get)
+	router.POST("/task/recurring/cancel", httpAPI.CancelRecurringTask)
 
 	// task meaning task execution
 	router.POST("/task", httpAPI.ExecuteTask)

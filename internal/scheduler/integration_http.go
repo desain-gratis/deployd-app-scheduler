@@ -116,6 +116,10 @@ func (h *httpAPI) ExecuteTask(w http.ResponseWriter, r *http.Request, p httprout
 	fmt.Fprint(w, string(resp))
 }
 
+func (h *httpAPI) CancelRecurringTask(w http.ResponseWriter, r *http.Request, p httprouter.Params) {
+
+}
+
 func (h *httpAPI) CancelTaskExecution(w http.ResponseWriter, r *http.Request, p httprouter.Params) {
 	payload, err := io.ReadAll(r.Body)
 	if err != nil {
@@ -145,30 +149,30 @@ func (h *httpAPI) CancelTaskExecution(w http.ResponseWriter, r *http.Request, p 
 	}
 
 	// client validation (raft will validate as well, this just to make it quicker)
-	switch taskExec.Status {
-	case entity.ExecutionStatusInProgress, entity.ExecutionStatusPending:
-	default:
+
+	err = scheduler.ValidateUpdate(taskExec, &input)
+	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
-		fmt.Fprintf(w, "invalid state: %v", err)
+		fmt.Fprintf(w, "WADUUH: %v", err)
 		return
 	}
 
 	taskExec.Status = entity.ExecutionStatusCancelled
 
-	// server do something
-	data := scheduler.UpdateTaskExecution(taskExec)
+	// TODO: take some field from input (eg. cancellation reason, etc..)
 
-	result, err := h.rc.Propose(r.Context(), data)
+	// Update to raft
+	result, err := h.rc.Propose(r.Context(), scheduler.UpdateTaskExecution(taskExec))
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
-		fmt.Fprintf(w, "XXX UWADUUH: %v %v", err, data)
+		fmt.Fprintf(w, "XXX UWADUUH: %v %v", err, taskExec)
 		return
 	}
 
 	resp, err := json.Marshal(result)
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
-		fmt.Fprintf(w, "XXX UWADUUH: %v %v", err, data)
+		fmt.Fprintf(w, "XXX UWADUUH: %v %v", err, result)
 		return
 	}
 

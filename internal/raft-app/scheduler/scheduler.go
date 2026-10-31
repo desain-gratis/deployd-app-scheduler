@@ -34,7 +34,6 @@ type scheduler struct {
 	topic     notifier.Topic
 
 	scheduledTaskUsecase *mycontent_base.Handler[*entity.RecurringTask]
-	taskExecutionUsecase *mycontent_base.Handler[*entity.TaskExecution]
 
 	executor chan *entity.TaskExecution
 
@@ -53,16 +52,13 @@ var ErrRetryable = errors.New("retryable")
 
 func New(namespace string, topic notifier.Topic, dbJob *badger.DB, teStorageV2 TaskExecutionStorage, executor chan *entity.TaskExecution) *scheduler {
 	scheduledTaskStorage := content_badger.New(dbJob, TableRecurringTask, 0)
-	taskExecutionStorage := content_badger.NewAutoIncrement(dbJob, TableTaskExecution, 1) // refer to queue
 
 	scheduledTaskUsecase := mycontent_base.New[*entity.RecurringTask](scheduledTaskStorage)
-	taskExecutionUsecase := mycontent_base.New[*entity.TaskExecution](taskExecutionStorage)
 
 	return &scheduler{
 		namespace:              namespace,
 		topic:                  topic,
 		scheduledTaskUsecase:   scheduledTaskUsecase,
-		taskExecutionUsecase:   taskExecutionUsecase,
 		executor:               executor,
 		taskExecutionUsecaseV2: teStorageV2,
 	}
@@ -135,13 +131,17 @@ func (m *scheduler) OnUpdateV2(ctx context.Context, entry raft.EntryV2) (any, er
 
 		t := (*entity.TaskExecution)(data)
 
-		// experimental chDB
 		getData, err := m.taskExecutionUsecaseV2.GetByID(ctx, t.Ns, t.QueueID, t.Id)
 		if err != nil {
 			return nil, err
 		}
 		if getData == nil {
 			return nil, fmt.Errorf("task execution does not exist")
+		}
+
+		err = ValidateUpdate(getData, t)
+		if err != nil {
+			return nil, err
 		}
 
 		result, err := m.taskExecutionUsecaseV2.Post(ctx, t, metadata{EventID: entry.Index})
@@ -192,6 +192,47 @@ func (m *scheduler) OnUpdateV2(ctx context.Context, entry raft.EntryV2) (any, er
 	default:
 		return nil, fmt.Errorf("%w command: %s", errors.ErrUnsupported, cmd.Name)
 	}
+}
+
+func ValidateUpdate(before, after *entity.TaskExecution) error {
+	switch before.Status {
+	case entity.ExecutionStatusPending:
+		switch after.Status {
+		case entity.ExecutionStatusPending, // pending
+			entity.ExecutionStatusInProgress,
+			entity.ExecutionStatusCancelled,
+			entity.ExecutionStatusMissed:
+			return nil
+		}
+	case entity.ExecutionStatusInProgress:
+		switch after.Status {
+		case entity.ExecutionStatusCancelled,
+			entity.ExecutionStatusInterrupted,
+			entity.ExecutionStatusTimeout,
+			entity.ExecutionStatusFailed,
+			entity.ExecutionStatusSucceed:
+			return nil
+		}
+	case entity.ExecutionStatusMissed:
+		switch after.Status {
+		case entity.ExecutionStatusPending, entity.ExecutionStatusCancelled:
+			return nil
+		}
+	case entity.ExecutionStatusTimeout:
+		fallthrough
+	case entity.ExecutionStatusInterrupted:
+		fallthrough
+	case entity.ExecutionStatusCancelled:
+		fallthrough
+	case entity.ExecutionStatusFailed:
+		fallthrough
+	case entity.ExecutionStatusSucceed:
+		// if you want to run again,
+		// you need to create new (immediate) task execution, mentioning this as it's parent
+		return fmt.Errorf("task already in terminal state %v", before.Status)
+	}
+
+	return fmt.Errorf("task cannot go from %v to %v", before.Status, after.Status)
 }
 
 func (m *scheduler) userCreateTask(ctx context.Context, data CreateRecurringTask, mode string) (any, error) {

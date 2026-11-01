@@ -152,7 +152,6 @@ func (ls *leader) periodicCheck(ctx context.Context, t0 time.Time) error {
 	for nodeID, progress := range ls.raftNode.Status().Progress {
 		if progress.RecentActive {
 			ls.healthyUIDs[nodeID] = struct{}{}
-			ls.healthyUID = nodeID // TODO: for now just select the last
 		} else {
 			unhealthyUIDs = append(unhealthyUIDs, nodeID)
 		}
@@ -160,6 +159,17 @@ func (ls *leader) periodicCheck(ctx context.Context, t0 time.Time) error {
 
 	if len(ls.healthyUIDs) == 0 {
 		return fmt.Errorf("leader: no healthy node")
+	}
+
+	// if the previous is still healthy, we will not change the healthyUIDs
+	// if not or at initialization, we select any healthy UIDs
+	// todo: task can have node/worker preferences in which they may execute in
+	_, ok := ls.healthyUIDs[ls.healthyUID]
+	if ls.healthyUID == 0 || !ok {
+		for anyHealthyUID := range ls.healthyUIDs {
+			ls.healthyUID = anyHealthyUID
+			break
+		}
 	}
 
 	_ = ls.assignPendingTasks(ctx, ls.healthyUID, t0)

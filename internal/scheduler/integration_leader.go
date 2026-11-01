@@ -98,8 +98,8 @@ func (ls *leader) Handler(ctx context.Context, term, leaderID uint64) {
 					nextGenerate = task.State.LastGenerateEnd
 				}
 
-				log.Printf("leader: recurring task %v has been generated, triggering next rechedule at %v", task.Id, nextGenerate)
-				time.AfterFunc(time.Until(nextGenerate), func() { // can sub 10 second to trigger ssooner
+				log.Printf("leader: recurring task %v has been generated, scheduling next trigger at %v", task.Id, nextGenerate)
+				time.AfterFunc(time.Until(nextGenerate), func() { // can subtract with arbitrary duration to trigger it sooner (eg. 3 hours / 1 day before)
 					t := time.Now()
 					log.Printf("leader: duar! %v", t)
 					err := ls.triggerGenerate(ctx, task, t)

@@ -271,7 +271,8 @@ func (w *worker) loadTaskExec(ctx context.Context, taskExec *entity.TaskExecutio
 	// if the queue no longer found
 	q, ok := w.queue[taskExec.QueueID]
 	if !ok {
-		log.Printf("warn: queue %v not found in this node", taskExec.QueueID)
+		// todo: queue validation should happens at creation
+		// and additional handling..
 		return
 	}
 

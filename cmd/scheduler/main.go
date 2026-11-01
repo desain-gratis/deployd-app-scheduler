@@ -128,5 +128,7 @@ func enableSchedulerModule(ctx context.Context, router *httprouter.Router) {
 	// task meaning task execution
 	router.POST("/task", httpAPI.ExecuteTask)
 	router.POST("/task/cancel", httpAPI.CancelTaskExecution)
-	router.GET("/task", taskExecutionHandler.Get)
+	router.GET("/task/daily", httpAPI.GetDailyCount)
+	router.GET("/task/hourly", httpAPI.GetHourlyCount)
+	router.GET("/task", taskExecutionHandler.Get) // todo: integrate with httpAPI to make it consistent
 }

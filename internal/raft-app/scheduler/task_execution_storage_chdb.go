@@ -21,13 +21,6 @@ type metadata struct {
 	EventID uint64
 }
 
-type TaskExecutionFilter struct {
-	Before           *time.Time
-	AssignmentStatus *entity.AssignmentStatus
-	ExecutionStatus  []entity.ExecutionStatus
-	AssignedNode     []uint64
-}
-
 var (
 	// indexColumn used to specify individual tasks
 	queryIndexColumn = []string{"namespace", "queue_id", "id"}
@@ -191,7 +184,7 @@ func (t *teStorageChDB) GetAll(
 	ctx context.Context,
 	indexes ...string,
 ) (chan *entity.TaskExecution, chan error) {
-	return t.GetAllWithFilter(ctx, TaskExecutionFilter{}, indexes...)
+	return t.GetAllWithFilter(ctx, TaskExecutionFilter{}, "", indexes...)
 }
 
 // GetAllWithFilter reads the latest event for each task execution,
@@ -200,6 +193,7 @@ func (t *teStorageChDB) GetAll(
 func (t *teStorageChDB) GetAllWithFilter(
 	ctx context.Context,
 	filter TaskExecutionFilter,
+	userLocation string,
 	indexes ...string,
 ) (chan *entity.TaskExecution, chan error) {
 	taskCh := make(chan *entity.TaskExecution)
@@ -208,6 +202,10 @@ func (t *teStorageChDB) GetAllWithFilter(
 	go func() {
 		defer close(taskCh)
 		defer close(errCh)
+
+		if userLocation == "" {
+			userLocation = "UTC"
+		}
 
 		whereStatement, whereArgs, err := GenerateSQLWhere(queryIndexColumn, indexes...)
 		if err != nil {
@@ -231,6 +229,21 @@ func (t *teStorageChDB) GetAllWithFilter(
 		if filter.Before != nil {
 			query += " AND scheduled_run_at < ?"
 			whereArgs = append(whereArgs, filter.Before.UTC())
+		}
+
+		if filter.Date != nil {
+			query += " AND toDate(scheduled_run_at, ?) = toDate(?)"
+			whereArgs = append(whereArgs, userLocation, filter.Date.Format("2006-01-02"))
+		}
+
+		if filter.StartDate != nil {
+			query += " AND toDate(scheduled_run_at, ?) >= toDate(?)"
+			whereArgs = append(whereArgs, userLocation, filter.StartDate.Format("2006-01-02"))
+		}
+
+		if filter.EndDate != nil {
+			query += " AND toDate(scheduled_run_at, ?) <= toDate(?)"
+			whereArgs = append(whereArgs, userLocation, filter.EndDate.Format("2006-01-02"))
 		}
 
 		if len(filter.ExecutionStatus) > 0 {
@@ -329,4 +342,262 @@ func (t *teStorageChDB) GetPendingTasksCount(
 	}
 
 	return int(count), nil
+}
+
+func (t *teStorageChDB) GetDailyCount(
+	ctx context.Context,
+	filter TaskExecutionFilter,
+	userLocation string,
+	indexes ...string,
+) (chan *TaskExecutionDailyCount, chan error) {
+	resultCh := make(chan *TaskExecutionDailyCount)
+	errCh := make(chan error, 1)
+
+	go func() {
+		defer close(resultCh)
+		defer close(errCh)
+
+		if userLocation == "" {
+			userLocation = "UTC"
+		}
+
+		whereStatement, whereArgs, err := GenerateSQLWhere(queryIndexColumn, indexes...)
+		if err != nil {
+			errCh <- err
+			return
+		}
+
+		query := `
+			SELECT
+				toString(toDate(scheduled_run_at, ?)) AS day,
+				queue_id,
+				count() AS task_count
+			FROM
+			(
+				SELECT *
+				FROM scheduler.task_execution
+				` + whereStatement + `
+				ORDER BY event_id DESC
+				LIMIT 1 BY namespace, queue_id, id
+			)
+			WHERE 1 = 1
+		`
+
+		// User timezone is the first placeholder in the query.
+		args := []any{userLocation}
+		args = append(args, whereArgs...)
+
+		if filter.Before != nil {
+			query += " AND scheduled_run_at < ?"
+			args = append(args, filter.Before.UTC())
+		}
+
+		if filter.Date != nil {
+			query += " AND toDate(scheduled_run_at, ?) = toDate(?)"
+			args = append(args, userLocation, filter.Date.Format("2006-01-02"))
+		}
+
+		if filter.StartDate != nil {
+			query += " AND toDate(scheduled_run_at, ?) >= toDate(?)"
+			args = append(args, userLocation, filter.StartDate.Format("2006-01-02"))
+		}
+
+		if filter.EndDate != nil {
+			query += " AND toDate(scheduled_run_at, ?) <= toDate(?)"
+			args = append(args, userLocation, filter.EndDate.Format("2006-01-02"))
+		}
+
+		if len(filter.ExecutionStatus) > 0 {
+			query += " AND execution_status IN (" +
+				strings.TrimSuffix(strings.Repeat("?,", len(filter.ExecutionStatus)), ",") +
+				")"
+
+			for _, status := range filter.ExecutionStatus {
+				args = append(args, string(status))
+			}
+		}
+
+		if filter.AssignmentStatus != nil {
+			query += " AND assignment_status = ?"
+			args = append(args, string(*filter.AssignmentStatus))
+		}
+
+		if len(filter.AssignedNode) > 0 {
+			query += " AND assignment_assigned_node IN (" +
+				strings.TrimSuffix(strings.Repeat("?,", len(filter.AssignedNode)), ",") +
+				")"
+
+			for _, nodeID := range filter.AssignedNode {
+				args = append(args, nodeID)
+			}
+		}
+
+		query += `
+			GROUP BY day, queue_id
+			ORDER BY day, queue_id
+		`
+
+		rows, err := t.db.QueryContext(ctx, query, args...)
+		if err != nil {
+			errCh <- fmt.Errorf("query context: %w", err)
+			return
+		}
+		defer rows.Close()
+
+		for rows.Next() {
+			var result TaskExecutionDailyCount
+
+			if err := rows.Scan(
+				&result.Day,
+				&result.QueueID,
+				&result.Count,
+			); err != nil {
+				errCh <- fmt.Errorf("scan: %w", err)
+				return
+			}
+
+			select {
+			case resultCh <- &result:
+			case <-ctx.Done():
+				errCh <- ctx.Err()
+				return
+			}
+		}
+
+		if err := rows.Err(); err != nil {
+			errCh <- fmt.Errorf("rows err: %w", err)
+		}
+	}()
+
+	return resultCh, errCh
+}
+
+func (t *teStorageChDB) GetHourlyCount(
+	ctx context.Context,
+	filter TaskExecutionFilter,
+	userLocation string,
+	indexes ...string,
+) (chan *TaskExecutionHourlyCount, chan error) {
+	resultCh := make(chan *TaskExecutionHourlyCount)
+	errCh := make(chan error, 1)
+
+	go func() {
+		defer close(resultCh)
+		defer close(errCh)
+
+		if userLocation == "" {
+			userLocation = "UTC"
+		}
+
+		whereStatement, whereArgs, err := GenerateSQLWhere(queryIndexColumn, indexes...)
+		if err != nil {
+			errCh <- err
+			return
+		}
+
+		query := `
+			SELECT
+				formatDateTime(
+					toStartOfHour(toTimeZone(scheduled_run_at, ?)),
+					'%Y-%m-%d %H:00:00'
+				) AS hour,
+				queue_id,
+				count() AS task_count
+			FROM
+			(
+				SELECT *
+				FROM scheduler.task_execution
+				` + whereStatement + `
+				ORDER BY event_id DESC
+				LIMIT 1 BY namespace, queue_id, id
+			)
+			WHERE 1 = 1
+		`
+
+		args := []any{userLocation}
+		args = append(args, whereArgs...)
+
+		if filter.Before != nil {
+			query += " AND scheduled_run_at < ?"
+			args = append(args, filter.Before.UTC())
+		}
+
+		if filter.Date != nil {
+			query += " AND toDate(toTimeZone(scheduled_run_at, ?)) = toDate(?)"
+			args = append(args, userLocation, filter.Date.Format("2006-01-02"))
+		}
+
+		if filter.StartDate != nil {
+			query += " AND toDate(toTimeZone(scheduled_run_at, ?)) >= toDate(?)"
+			args = append(args, userLocation, filter.StartDate.Format("2006-01-02"))
+		}
+
+		if filter.EndDate != nil {
+			query += " AND toDate(toTimeZone(scheduled_run_at, ?)) <= toDate(?)"
+			args = append(args, userLocation, filter.EndDate.Format("2006-01-02"))
+		}
+
+		if len(filter.ExecutionStatus) > 0 {
+			query += " AND execution_status IN (" +
+				strings.TrimSuffix(strings.Repeat("?,", len(filter.ExecutionStatus)), ",") +
+				")"
+
+			for _, status := range filter.ExecutionStatus {
+				args = append(args, string(status))
+			}
+		}
+
+		if filter.AssignmentStatus != nil {
+			query += " AND assignment_status = ?"
+			args = append(args, string(*filter.AssignmentStatus))
+		}
+
+		if len(filter.AssignedNode) > 0 {
+			query += " AND assignment_assigned_node IN (" +
+				strings.TrimSuffix(strings.Repeat("?,", len(filter.AssignedNode)), ",") +
+				")"
+
+			for _, nodeID := range filter.AssignedNode {
+				args = append(args, nodeID)
+			}
+		}
+
+		query += `
+			GROUP BY hour, queue_id
+			ORDER BY hour, queue_id
+		`
+
+		rows, err := t.db.QueryContext(ctx, query, args...)
+		if err != nil {
+			errCh <- err
+			return
+		}
+		defer rows.Close()
+
+		for rows.Next() {
+			var result TaskExecutionHourlyCount
+
+			if err := rows.Scan(
+				&result.Hour,
+				&result.QueueID,
+				&result.Count,
+			); err != nil {
+				errCh <- err
+				return
+			}
+
+			select {
+			case resultCh <- &result:
+			case <-ctx.Done():
+				errCh <- ctx.Err()
+				return
+			}
+		}
+
+		if err := rows.Err(); err != nil {
+			errCh <- err
+		}
+	}()
+
+	return resultCh, errCh
 }

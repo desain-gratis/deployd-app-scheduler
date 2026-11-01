@@ -58,6 +58,66 @@ func (h *httpAPI) Hello(w http.ResponseWriter, r *http.Request, p httprouter.Par
 	}
 }
 
+func (h *httpAPI) GetDailyCount(w http.ResponseWriter, r *http.Request, p httprouter.Params) {
+	results, errs := h.tes.GetDailyCount(r.Context(), scheduler.TaskExecutionFilter{}, "Asia/Jakarta")
+	for results != nil || errs != nil {
+		select {
+		case result, ok := <-results:
+			if !ok {
+				results = nil
+				continue
+			}
+
+			fmt.Fprintf(
+				w,
+				"Day: %s, Queue: %s, Count: %d\n",
+				result.Day,
+				result.QueueID,
+				result.Count,
+			)
+
+		case err, ok := <-errs:
+			if !ok {
+				errs = nil
+				continue
+			}
+
+			w.WriteHeader(http.StatusInternalServerError)
+			fmt.Fprintf(w, "Aggregation error: %v", err)
+		}
+	}
+}
+
+func (h *httpAPI) GetHourlyCount(w http.ResponseWriter, r *http.Request, p httprouter.Params) {
+	results, errs := h.tes.GetHourlyCount(r.Context(), scheduler.TaskExecutionFilter{}, "Asia/Jakarta")
+	for results != nil || errs != nil {
+		select {
+		case result, ok := <-results:
+			if !ok {
+				results = nil
+				continue
+			}
+
+			fmt.Fprintf(
+				w,
+				"Day-Hour: %s, Queue: %s, Count: %d\n",
+				result.Hour,
+				result.QueueID,
+				result.Count,
+			)
+
+		case err, ok := <-errs:
+			if !ok {
+				errs = nil
+				continue
+			}
+
+			w.WriteHeader(http.StatusInternalServerError)
+			fmt.Fprintf(w, "Aggregation error: %v", err)
+		}
+	}
+}
+
 func (h *httpAPI) ExecuteTask(w http.ResponseWriter, r *http.Request, p httprouter.Params) {
 	payload, err := io.ReadAll(r.Body)
 	if err != nil {

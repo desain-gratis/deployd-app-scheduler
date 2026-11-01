@@ -268,7 +268,7 @@ func (ls *leader) assignPendingTask(ctx context.Context, anyHealthyUID uint64, t
 
 	taskExec.AssignmentState.AssignedTo = anyHealthyUID
 	taskExec.AssignmentState.AssignedBy = ls.client.ID()
-	taskExec.AssignmentState.AssignmentTime = t
+	taskExec.AssignmentState.AssignmentTime = t.In(taskExec.UserTime.Location())
 	taskExec.AssignmentState.AssignmentCount++
 	taskExec.AssignmentStatus = entity.AssignmentStatusAssigned
 

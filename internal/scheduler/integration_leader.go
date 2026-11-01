@@ -30,6 +30,9 @@ type leader struct {
 
 	raftNode     raft.Node
 	subscription notifier.Subscription
+
+	healthyUIDs map[uint64]struct{}
+	healthyUID  uint64
 }
 
 // Main loop for leader
@@ -37,25 +40,23 @@ func (ls *leader) Handler(ctx context.Context, term, leaderID uint64) {
 	_ = ls.periodicCheck(ctx, time.Now())
 
 	// todo: refactor
-	regenerate := make(chan *entity.RecurringTask)
-
+	t := time.Now()
 	// todo pt in function
 	allRecurringTasks, err := ls.taskDefinitionStoreRO.Get(ctx, ls.namespace, nil, "")
 	if err != nil {
 		return
 	}
-	for _, rt := range allRecurringTasks {
-		if rt.State == nil {
-			// warning!
-			continue
+	for _, task := range allRecurringTasks {
+		nextGenerate := t // immediate for new task
+		if task.State != nil {
+			nextGenerate = task.State.LastGenerateEnd
 		}
 
-		_ = time.AfterFunc(time.Until(rt.State.LastGenerateEnd), func() {
-			if ctx.Err() != nil {
-				return
+		time.AfterFunc(time.Until(nextGenerate), func() {
+			err := ls.triggerGenerate(ctx, task, t)
+			if err != nil {
+				log.Printf("leader: err creating scheduled task execution instances %v", err)
 			}
-
-			regenerate <- rt
 		})
 	}
 
@@ -68,35 +69,23 @@ func (ls *leader) Handler(ctx context.Context, term, leaderID uint64) {
 				log.Printf("leader: error during periodic check: %v", err)
 			}
 
-		case task := <-regenerate:
-			updatedTaskAny, err := ls.client.Propose(ctx, scheduler.RequestRegenerateTaskInstances{
-				Task:       task,
-				ServerTime: time.Now(),
-			})
-			if err != nil {
-				log.Printf("leader: err creating scheduled task execution instances %v", err)
-				continue
-			}
-
-			updatedTask, ok := updatedTaskAny.(*entity.RecurringTask)
-			if !ok {
-				log.Printf("leader: not a recurring task")
-			}
-
-			_ = time.AfterFunc(time.Until(updatedTask.State.LastGenerateEnd), func() {
-				if ctx.Err() != nil {
-					return
-				}
-
-				regenerate <- updatedTask
-			})
-
 		case msg := <-ls.subscription.Listen():
 			t := time.Now()
 
 			switch evt := msg.(type) {
-			case scheduler.EventRecurringTaskCreated, scheduler.EventRecurringTaskNeedRegenerate:
-				log.Printf("leader: a new task definition has come. I better schedule! %+v", evt)
+			case scheduler.EventRecurringTaskCreated:
+				task := getTask(evt)
+				if task == nil {
+					// TODO: error inside the raft app, can check which causes empty event
+					log.Printf("leader: lah task nya nil")
+					continue
+				}
+				log.Printf("leader: a new recurring task has come. Triggering generate %v", task.Id)
+				err = ls.triggerGenerate(ctx, task, t)
+				if err != nil {
+					log.Printf("leader: failed to trigger generate %v", err)
+				}
+			case scheduler.EventRecurringTaskGenerated:
 				task := getTask(evt)
 				if task == nil {
 					// TODO: error inside the raft app, can check which causes empty event
@@ -104,10 +93,20 @@ func (ls *leader) Handler(ctx context.Context, term, leaderID uint64) {
 					continue
 				}
 
-				go func() {
-					regenerate <- task
-				}()
+				nextGenerate := t // immediate for new task
+				if task.State != nil {
+					nextGenerate = task.State.LastGenerateEnd
+				}
 
+				log.Printf("leader: recurring task %v has been generated, triggering next rechedule at %v", task.Id, nextGenerate)
+				time.AfterFunc(time.Until(nextGenerate), func() { // can sub 10 second to trigger ssooner
+					t := time.Now()
+					log.Printf("leader: duar! %v", t)
+					err := ls.triggerGenerate(ctx, task, t)
+					if err != nil {
+						log.Printf("leader: err creating scheduled task execution instances %v", err)
+					}
+				})
 			case scheduler.EventTaskExecutionCreated:
 				taskExec := (*entity.TaskExecution)(evt)
 
@@ -133,28 +132,38 @@ func (ls *leader) Handler(ctx context.Context, term, leaderID uint64) {
 	}
 }
 
+func (ls *leader) triggerGenerate(ctx context.Context, task *entity.RecurringTask, t time.Time) error {
+	_, err := ls.client.Propose(ctx, scheduler.GenerateRecurringTaskExecution{
+		Task:       task,
+		ServerTime: t,
+	})
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
 // check for unhealthy and if found, re-assign task execution, notify worker
 func (ls *leader) periodicCheck(ctx context.Context, t0 time.Time) error {
-	healthyUIDs := map[uint64]struct{}{}
 	unhealthyUIDs := make([]uint64, 0)
-	var healthyUID uint64
 
 	// only available in leader
 	for nodeID, progress := range ls.raftNode.Status().Progress {
 		if progress.RecentActive {
-			healthyUIDs[nodeID] = struct{}{}
-			healthyUID = nodeID // TODO: for now just select the last
+			ls.healthyUIDs[nodeID] = struct{}{}
+			ls.healthyUID = nodeID // TODO: for now just select the last
 		} else {
 			unhealthyUIDs = append(unhealthyUIDs, nodeID)
 		}
 	}
 
-	if len(healthyUIDs) == 0 {
+	if len(ls.healthyUIDs) == 0 {
 		return fmt.Errorf("leader: no healthy node")
 	}
 
-	_ = ls.assignPendingTasks(ctx, healthyUID, t0)
-	_ = ls.reassignTasksFromUnhealthyNode(ctx, healthyUID, unhealthyUIDs, t0) // can be in different periodic tick
+	_ = ls.assignPendingTasks(ctx, ls.healthyUID, t0)
+	_ = ls.reassignTasksFromUnhealthyNode(ctx, ls.healthyUID, unhealthyUIDs, t0) // can be in different periodic tick
 
 	return nil
 }

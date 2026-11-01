@@ -38,7 +38,7 @@ type CreateRecurringTask struct {
 
 type UpdateRecurringTask CreateRecurringTask
 
-type RequestRegenerateTaskInstances struct {
+type GenerateRecurringTaskExecution struct {
 	Task       *entity.RecurringTask
 	ServerTime time.Time
 }

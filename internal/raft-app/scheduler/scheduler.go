@@ -154,7 +154,7 @@ func (m *scheduler) OnUpdateV2(ctx context.Context, entry raft.EntryV2) (any, er
 		return result, nil
 
 	case Command_Leader_GenerateRecurringTaskExecution:
-		data, err := parseAs[RequestRegenerateTaskInstances](cmd.Value)
+		data, err := parseAs[GenerateRecurringTaskExecution](cmd.Value)
 		if err != nil {
 			return nil, err
 		}
@@ -257,17 +257,18 @@ func (m *scheduler) generateRecurringTasks(ctx context.Context, entry raft.Entry
 		return nil, fmt.Errorf("empty task definition")
 	}
 
-	if task.State != nil && task.State.LastGenerateEnd.After(serverTime.Add(-1*time.Minute)) { // arbitrary delta 1 minute
-		// WORKER SHOULD KNOW ABOUT THIS TIME, LET JUST SKIP
-		return task, nil
-	}
-
 	// generate between last generate end, and server time's next one hour
 
-	serverTime = serverTime.Truncate(1 * time.Second)
+	serverTime = serverTime.Truncate(1 * time.Second).In(task.UserTime.Location())
 
 	t0 := serverTime
-	t1 := serverTime.AddDate(1, 0, 0) // GENERATE FOR FULL YEAR (PLANNED)
+
+	if task.State != nil {
+		// use start time from server
+		t0 = task.State.LastGenerateEnd
+	}
+
+	t1 := serverTime.AddDate(1, 0, 0) // Generate for another whole year, but it can be lower; end time still uses server time
 
 	loc := task.UserTime.Location() // schedule relative to Task's location / time zone
 	schedule, err := crong.New(task.Cron, loc)
@@ -325,7 +326,7 @@ func (m *scheduler) generateRecurringTasks(ctx context.Context, entry raft.Entry
 		m.topic.Broadcast(ctx, EventTaskExecutionCreated(result))
 		// }(rt, entry.Index)
 
-		lastGeneratedEnd = t1
+		lastGeneratedEnd = next
 	}
 
 	// log.Printf("Scheduled %v task execution instance(s): %v. Updating the task.", count, execTimes)
@@ -338,6 +339,8 @@ func (m *scheduler) generateRecurringTasks(ctx context.Context, entry raft.Entry
 		log.Printf("ERROR update task %v", err)
 		return nil, err
 	}
+
+	m.topic.Broadcast(ctx, EventRecurringTaskGenerated(updatedTask))
 
 	return updatedTask, nil
 }

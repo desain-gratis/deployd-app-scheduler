@@ -30,7 +30,6 @@ func NewPooledQueue(ctx context.Context, client *genericjob.Client, count int, f
 
 				runAt := time.Now().In(taskExec.UserTime.Location())
 				taskExec.Status = entity.ExecutionStatusInProgress
-
 				taskExec.ExecutionState = &entity.ExecutionState{
 					ActualRunAt: &runAt,
 				}
@@ -38,7 +37,7 @@ func NewPooledQueue(ctx context.Context, client *genericjob.Client, count int, f
 				// update before
 				_, err := client.Propose(ctx, genericjob.UpdateTaskExecution(taskExec.TaskExecution))
 				if err != nil {
-					log.Printf("executor: failed to update task execution instance: %v\n", err)
+					log.Printf("executor: failed to update task execution to %v: %v (%v) %v\n", taskExec.Status, taskExec.Id, taskExec.QueueID, err)
 					return
 				}
 
@@ -59,7 +58,7 @@ func NewPooledQueue(ctx context.Context, client *genericjob.Client, count int, f
 				_, err = client.Propose(ctx, genericjob.UpdateTaskExecution(taskExec.TaskExecution))
 				if err != nil {
 					// failed to inform cluster back. Leader's timeout mechanism will kick in.
-					log.Printf("executor: failed to update task execution instance: %v\n", err)
+					log.Printf("executor: failed to update task execution to %v: %v (%v) %v\n", taskExec.Status, taskExec.Id, taskExec.QueueID, err)
 					return
 				}
 			}

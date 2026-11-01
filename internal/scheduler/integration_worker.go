@@ -374,7 +374,7 @@ type timeQueue struct {
 // Called everytime becoming raft leader
 // Context will be cancelled when stepping down from raft leader
 func (w *worker) OnBecomingRaftLeader(ctx context.Context, term uint64, leaderID uint64) error {
-	ticker := time.NewTicker(10 * time.Second)
+	ticker := time.NewTicker(5 * time.Second) // todo: maybe separate health tick & task execution tick
 
 	timers := make(map[string]*time.Timer)
 	timersLock := &sync.RWMutex{}
@@ -404,6 +404,9 @@ func (w *worker) OnBecomingRaftLeader(ctx context.Context, term uint64, leaderID
 		ticker:       ticker,
 		raftNode:     node,
 		subscription: subscription,
+
+		healthyUIDs: make(map[uint64]struct{}),
+		healthyUID:  0,
 	}
 
 	go func(term, leaderID uint64) {
@@ -420,6 +423,8 @@ func getTask(taskish any) *entity.RecurringTask {
 	case scheduler.EventRecurringTaskCreated:
 		return (*entity.RecurringTask)(task)
 	case scheduler.EventRecurringTaskUpdated:
+		return (*entity.RecurringTask)(task)
+	case scheduler.EventRecurringTaskGenerated:
 		return (*entity.RecurringTask)(task)
 	}
 

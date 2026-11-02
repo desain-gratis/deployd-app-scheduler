@@ -58,11 +58,13 @@ type TaskExecutionFilter struct {
 type TaskExecutionDailyCount struct {
 	Day     string `json:"day"` // YYYY-MM-DD in UserLocation
 	QueueID string `json:"queue_id"`
+	Status  string `json:"status,omitempty"`
 	Count   uint64 `json:"count"`
 }
 
 type TaskExecutionHourlyCount struct {
 	Hour    string `json:"hour"` // YYYY-MM-DD HH:00:00
 	QueueID string `json:"queue_id"`
+	Status  string `json:"status,omitempty"`
 	Count   uint64 `json:"count"`
 }

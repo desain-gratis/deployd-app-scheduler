@@ -109,20 +109,12 @@ func (ls *leader) Handler(ctx context.Context, term, leaderID uint64) {
 				})
 			case scheduler.EventTaskExecutionCreated:
 				taskExec := (*entity.TaskExecution)(evt)
-
-				healthyUIDs := map[uint64]struct{}{}
-				var anyHealthyUID uint64
-
-				// only available in leader
-				for nodeID, progress := range ls.raftNode.Status().Progress {
-					if progress.RecentActive {
-						healthyUIDs[nodeID] = struct{}{}
-						anyHealthyUID = nodeID // TODO: for now just select the last
-					}
+				if ls.healthyUID == 0 {
+					// should be fatal, since it's should be assigned during the first periodicCheck()
+					log.Printf("leader: no healthy UID during task assignment")
+					continue
 				}
-
-				// whenever new task coming, we attempt to assign it to worker
-				ls.assignPendingTask(ctx, anyHealthyUID, taskExec, t)
+				ls.assignPendingTask(ctx, ls.healthyUID, taskExec, t)
 			default:
 				// log.Printf("Unknown job evt")
 			}

@@ -95,13 +95,18 @@ func (ls *leader) Handler(ctx context.Context, term, leaderID uint64) {
 
 				nextGenerate := t // immediate for new task
 				if task.State != nil {
-					nextGenerate = task.State.LastGenerateEnd
+					start := task.State.LastGenerateStart
+					end := task.State.LastGenerateEnd
+
+					nextGenerate = start.Add(end.Sub(start) / 2)
 				}
 
 				log.Printf("leader: recurring task %v has been generated, scheduling next trigger at %v", task.Id, nextGenerate)
-				time.AfterFunc(time.Until(nextGenerate)/2, func() { // can subtract with arbitrary duration to trigger it sooner (eg. 3 hours / 1 day before)
+
+				time.AfterFunc(time.Until(nextGenerate), func() {
 					t := time.Now()
 					log.Printf("leader: duar! %v", t)
+
 					err := ls.triggerGenerate(ctx, task, t)
 					if err != nil {
 						log.Printf("leader: err creating scheduled task execution instances %v", err)

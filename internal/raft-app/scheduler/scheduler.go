@@ -332,6 +332,7 @@ func (m *scheduler) generateRecurringTasks(ctx context.Context, entry raft.Entry
 	// log.Printf("Scheduled %v task execution instance(s): %v. Updating the task.", count, execTimes)
 
 	// Update the task definition state
+	task.State.LastGenerateStart = t0
 	task.State.LastGenerateEnd = lastGeneratedEnd
 
 	updatedTask, err := m.scheduledTaskUsecase.Post(ctx, task, nil)

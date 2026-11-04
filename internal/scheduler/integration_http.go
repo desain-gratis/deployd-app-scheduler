@@ -109,7 +109,7 @@ func (h *httpAPI) GetDailyCount(
 		}
 	}
 
-	writeJSON(w, http.StatusOK, data)
+	writeJSON(w, http.StatusOK, map[string]any{"success": data})
 }
 
 func (h *httpAPI) GetHourlyCount(
@@ -160,7 +160,7 @@ func (h *httpAPI) GetHourlyCount(
 		}
 	}
 
-	writeJSON(w, http.StatusOK, data)
+	writeJSON(w, http.StatusOK, map[string]any{"success": data})
 }
 
 func (h *httpAPI) ExecuteTask(w http.ResponseWriter, r *http.Request, p httprouter.Params) {

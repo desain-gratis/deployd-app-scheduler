@@ -68,20 +68,14 @@ func enableSchedulerModule(ctx context.Context, router *httprouter.Router) {
 		log.Fatal().Msgf("err running raft: %v", err)
 	}
 
-	// List of functions to be executed inside scheduler
-	// queue := map[string]chan *scheduler_integration.TaskExecutionRuntime{
-	// 	"sendInvoice()": scheduler_integration.NewPooledQueue(ctx, schedulerClient, 30, sendInvoice),
-	// 	"echoReverse()": scheduler_integration.NewPooledQueue(ctx, schedulerClient, 30, echoReverse),
-	// }
+	_ = scheduler.Queue(raftwrapper).
+		AddFunction(ctx, "sendInvoice()", 30, sendInvoice).
+		AddFunction(ctx, "echoReverse()", 30, echoReverse)
 
 	err = scheduler.StartWorker(ctx, raftwrapper)
 	if err != nil {
 		log.Fatal().Msgf("failed to start scheduler worker")
 	}
-
-	_ = scheduler.Queue(raftwrapper).
-		AddFunction(ctx, "sendInvoice()", 30, sendInvoice).
-		AddFunction(ctx, "echoReverse()", 30, echoReverse)
 
 	// Start the raft engine
 	err = raftwrapper.Start(ctx, scheduler.OnBecomingRaftLeader)

@@ -11,10 +11,10 @@ import (
 )
 
 type Client struct {
-	raftClient *runneretcd.RaftContext
+	raftClient *runneretcd.RaftWrapper
 }
 
-func NewClient(raftClient *runneretcd.RaftContext) *Client {
+func NewClient(raftClient *runneretcd.RaftWrapper) *Client {
 	return &Client{
 		raftClient: raftClient,
 	}

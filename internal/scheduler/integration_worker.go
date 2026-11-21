@@ -381,7 +381,7 @@ func (w *worker) OnBecomingRaftLeader(ctx context.Context, term uint64, leaderID
 	timersLock := &sync.RWMutex{}
 
 	// Guarantees that we can get the latest state, and all incoming message after that
-	rc := runneretcd.GetRaftContext(ctx)
+	rc := runneretcd.GetRaftWrapper(ctx)
 	// Load all task definition from store
 	node := rc.Node()
 

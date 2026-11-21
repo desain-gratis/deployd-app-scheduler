@@ -1,26 +1,25 @@
 package main
 
 import (
+	"context"
 	"log"
 	"time"
 
-	scheduler_integration "github.com/desain-gratis/deployd-app-scheduler/internal/scheduler"
+	schedulerapi "github.com/desain-gratis/common/delivery/scheduler-api"
 )
 
-func sendInvoice(taskExec *scheduler_integration.TaskExecutionRuntime) error {
+func sendInvoice(ctx context.Context, input any) (any, error) {
+	taskExec := schedulerapi.GetTaskExecutionView(ctx).TaskDefinition()
+
 	log.Printf("The task sendInvoice(): %v triggered! Scheduled run at %v with input: %v !", taskExec.Id, taskExec.ScheduledRunAt.Truncate(1*time.Second), taskExec.Input)
 
-	taskExec.ExecutionState.Output = "BERHAZIL"
-
-	return nil
+	return "BERHAZIL", nil
 }
 
-func echoReverse(taskExec *scheduler_integration.TaskExecutionRuntime) error {
-	b, ok := taskExec.Input.(string)
+func echoReverse(ctx context.Context, input any) (any, error) {
+	b, ok := input.(string)
 	if !ok {
-		taskExec.ExecutionState.Output = "Not a byte"
-
-		return nil
+		return "Not a byte", nil
 	}
 
 	runes := []rune(string(b))
@@ -28,9 +27,9 @@ func echoReverse(taskExec *scheduler_integration.TaskExecutionRuntime) error {
 		runes[i], runes[j] = runes[j], runes[i]
 	}
 
-	taskExec.ExecutionState.Output = string(runes)
+	output := string(runes)
 
-	log.Printf("The task echoReverse(): triggered! result: %v", string(runes))
+	log.Printf("The task echoReverse(): triggered! result: %v", output)
 
-	return nil
+	return output, nil
 }

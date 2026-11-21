@@ -10,16 +10,11 @@ import (
 
 	_ "github.com/chdb-io/chdb-go/v2/chdb/driver"
 	mycontentapi "github.com/desain-gratis/common/delivery/mycontent-api"
-	notifier_impl "github.com/desain-gratis/common/lib/notifier/impl"
+	schedulerapi "github.com/desain-gratis/common/delivery/scheduler-api"
 	runneretcd "github.com/desain-gratis/common/lib/raft/runner-etcd"
-	"github.com/dgraph-io/badger/v4"
 	"github.com/julienschmidt/httprouter"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
-
-	"github.com/desain-gratis/deployd-app-scheduler/internal/raft-app/scheduler"
-	scheduler_integration "github.com/desain-gratis/deployd-app-scheduler/internal/scheduler"
-	"github.com/desain-gratis/deployd-app-scheduler/src/entity"
 )
 
 const (
@@ -55,80 +50,59 @@ func main() {
 }
 
 func enableSchedulerModule(ctx context.Context, router *httprouter.Router) {
-	badgerDB, err := badger.Open(badger.DefaultOptions("./tmp/scheduler.db"))
-	if err != nil {
-		log.Fatal().Msgf("UHUY %v", err)
-	}
+	defaultNamespace := "deployd"
 
 	chDB, err := sql.Open("chdb", "session=./tmp/scheduler.chdb")
 	if err != nil {
 		log.Fatal().Msgf("UHUY %v", err)
 	}
 
-	taskExecutionStorage := scheduler.NewClickhouseTaskExecutionStorage(chDB)
-	err = taskExecutionStorage.Init(ctx)
+	scheduler, err := schedulerapi.NewReplicatedScheduler(ctx, defaultNamespace, chDB)
 	if err != nil {
-		log.Fatal().Msgf("UHUY %v", err)
+		log.Fatal().Msgf("FAILED init scheduler: %v", scheduler)
 	}
 
-	topic := notifier_impl.NewStandardTopic()
-
-	namespace := "deployd"
-	executorCh := make(chan *entity.TaskExecution) // to sync schedule - todo, might be no need anymore; since the separation now is clear
-	schedulerApp := scheduler.New(namespace, topic, badgerDB, taskExecutionStorage, executorCh)
-
-	schedulerRaft, _, err := runneretcd.RunWithConfig(ctx, os.Getenv("DEPLOYD_RAFT"), "scheduler", schedulerApp)
+	// raft wrapper
+	raftwrapper, _, err := runneretcd.InitWithConfig(ctx, os.Getenv("DEPLOYD_RAFT"), "scheduler", scheduler.StateMachine)
 	if err != nil {
 		log.Fatal().Msgf("err running raft: %v", err)
 	}
-
-	schedulerClient := scheduler.NewClient(schedulerRaft)
 
 	// List of functions to be executed inside scheduler
-	queue := map[string]chan *scheduler_integration.TaskExecutionRuntime{
-		"sendInvoice()": scheduler_integration.NewPooledQueue(ctx, schedulerClient, 30, sendInvoice),
-		"echoReverse()": scheduler_integration.NewPooledQueue(ctx, schedulerClient, 30, echoReverse),
-	}
+	// queue := map[string]chan *scheduler_integration.TaskExecutionRuntime{
+	// 	"sendInvoice()": scheduler_integration.NewPooledQueue(ctx, schedulerClient, 30, sendInvoice),
+	// 	"echoReverse()": scheduler_integration.NewPooledQueue(ctx, schedulerClient, 30, echoReverse),
+	// }
 
-	recurringTaskUsecase := schedulerApp.GetRecurringTaskStore()
-	taskExecutionUsecase := taskExecutionStorage.DGCompat()
-
-	worker := scheduler_integration.NewWorker(
-		namespace,
-		topic,
-		schedulerClient,
-		recurringTaskUsecase,
-		taskExecutionUsecase,
-		queue,
-		executorCh,
-	)
-	_ = worker.Init(ctx)
-
-	httpAPI := scheduler_integration.NewHttpAPI(topic, schedulerClient, taskExecutionStorage)
-
-	err = schedulerRaft.Run(ctx, worker.OnBecomingRaftLeader)
+	err = scheduler.StartWorker(ctx, raftwrapper)
 	if err != nil {
-		log.Fatal().Msgf("err running raft: %v", err)
+		log.Fatal().Msgf("failed to start scheduler worker")
 	}
 
-	err = worker.Run(ctx)
+	_ = scheduler.Queue(raftwrapper).
+		AddFunction(ctx, "sendInvoice()", 30, sendInvoice)
+
+	// Start the raft engine
+	err = raftwrapper.Start(ctx, scheduler.OnBecomingRaftLeader)
 	if err != nil {
-		log.Fatal().Msgf("err running integration: %v", err)
+		log.Fatal().Msgf("err running replicated scheduler: %v", err)
 	}
 
-	recurringTaskHandler := mycontentapi.New(recurringTaskUsecase, publicBaseURL+"/task", nil)
-	taskExecutionHandler := mycontentapi.New(taskExecutionUsecase, publicBaseURL+"/task/instance", []string{"queue_id"})
+	recurringTaskHandler := mycontentapi.New(scheduler.RecurringTaskUsecase, publicBaseURL+"/task", nil)
+	taskExecutionHandler := mycontentapi.New(scheduler.TaskExecutionUsecase, publicBaseURL+"/task/instance", []string{"queue_id"})
 
-	router.GET("/hello", httpAPI.Hello)
+	httpHandler := scheduler.HttpHandler(raftwrapper)
+	router.GET("/hello", httpHandler.Hello)
 
-	router.POST("/task/recurring", httpAPI.CreateRecurringTask)
+	router.POST("/task/recurring", scheduler.HttpHandler(raftwrapper).CreateRecurringTask)
 	router.GET("/task/recurring", recurringTaskHandler.Get)
-	router.POST("/task/recurring/cancel", httpAPI.CancelRecurringTask)
+	router.POST("/task/recurring/cancel", httpHandler.CancelRecurringTask)
 
 	// task meaning task execution
-	router.POST("/task", httpAPI.ExecuteTask)
-	router.POST("/task/cancel", httpAPI.CancelTaskExecution)
-	router.GET("/task/daily", httpAPI.GetDailyCount)
-	router.GET("/task/hourly", httpAPI.GetHourlyCount)
+	router.POST("/task", httpHandler.ExecuteTask)
+	router.POST("/task/cancel", httpHandler.CancelTaskExecution)
+	router.GET("/task/daily", httpHandler.GetDailyCount)
+	router.GET("/task/hourly", httpHandler.GetHourlyCount)
+
 	router.GET("/task", taskExecutionHandler.Get) // todo: integrate with httpAPI to make it consistent
 }

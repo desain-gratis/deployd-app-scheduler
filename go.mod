@@ -7,7 +7,7 @@ go 1.26.0
 require (
 	github.com/arcward/crong v0.0.0-20240827163849-4abe2a5262db
 	github.com/chdb-io/chdb-go/v2 v2.2.0
-	github.com/desain-gratis/common v0.0.0-20261121213813-1ad38d79d883
+	github.com/desain-gratis/common v0.0.0-20261121215438-48ebce7d6edc
 	github.com/dgraph-io/badger/v4 v4.9.6
 	github.com/google/uuid v1.6.0
 	github.com/julienschmidt/httprouter v1.3.0

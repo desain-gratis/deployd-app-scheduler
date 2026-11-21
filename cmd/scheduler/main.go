@@ -80,7 +80,8 @@ func enableSchedulerModule(ctx context.Context, router *httprouter.Router) {
 	}
 
 	_ = scheduler.Queue(raftwrapper).
-		AddFunction(ctx, "sendInvoice()", 30, sendInvoice)
+		AddFunction(ctx, "sendInvoice()", 30, sendInvoice).
+		AddFunction(ctx, "echoReverse()", 30, echoReverse)
 
 	// Start the raft engine
 	err = raftwrapper.Start(ctx, scheduler.OnBecomingRaftLeader)

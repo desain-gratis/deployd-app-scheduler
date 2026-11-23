@@ -68,7 +68,7 @@ func enableSchedulerModule(ctx context.Context, router *httprouter.Router) {
 		log.Fatal().Msgf("err running raft: %v", err)
 	}
 
-	_ = scheduler.Queue(raftwrapper).
+	_ = scheduler.Queue(raftwrapper, logger).
 		AddFunction(ctx, "sendInvoice()", 30, sendInvoice).
 		AddFunction(ctx, "echoReverse()", 30, echoReverse)
 

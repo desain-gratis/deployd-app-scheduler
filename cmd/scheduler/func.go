@@ -2,7 +2,7 @@ package main
 
 import (
 	"context"
-	"log"
+	"fmt"
 	"time"
 
 	schedulerapi "github.com/desain-gratis/common/delivery/scheduler-api"
@@ -10,13 +10,16 @@ import (
 
 func sendInvoice(ctx context.Context, input any) (any, error) {
 	taskExec := schedulerapi.GetTaskExecutionView(ctx).TaskDefinition()
+	log := schedulerapi.GetLogger(ctx)
 
-	log.Printf("The task sendInvoice(): %v triggered! Scheduled run at %v with input: %v !", taskExec.Id, taskExec.ScheduledRunAt.Truncate(1*time.Second), taskExec.Input)
+	log.Info(fmt.Sprintf("The task sendInvoice(): %v triggered! Scheduled run at %v with input: %v !", taskExec.Id, taskExec.ScheduledRunAt.Truncate(1*time.Second), taskExec.Input))
 
 	return "BERHAZIL", nil
 }
 
 func echoReverse(ctx context.Context, input any) (any, error) {
+	log := schedulerapi.GetLogger(ctx)
+
 	b, ok := input.(string)
 	if !ok {
 		return "Not a byte", nil
@@ -29,7 +32,7 @@ func echoReverse(ctx context.Context, input any) (any, error) {
 
 	output := string(runes)
 
-	log.Printf("The task echoReverse(): triggered! result: %v", output)
+	log.Info(fmt.Sprintf("The task echoReverse(): triggered! result: %v", output))
 
 	return output, nil
 }

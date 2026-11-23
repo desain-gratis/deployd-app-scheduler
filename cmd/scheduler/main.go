@@ -52,7 +52,7 @@ func main() {
 func enableSchedulerModule(ctx context.Context, router *httprouter.Router) {
 	defaultNamespace := "deployd"
 
-	chDB, err := sql.Open("chdb", "session=./tmp/scheduler.chdb")
+	chDB, err := sql.Open("chdb", "session=/data/deployd_scheduler/scheduler.chdb")
 	if err != nil {
 		log.Fatal().Msgf("UHUY %v", err)
 	}

@@ -3,10 +3,11 @@ package main
 import (
 	"context"
 	"database/sql"
-	"errors"
 	"os"
 	"os/signal"
 	"sync"
+	"syscall"
+	"time"
 
 	_ "github.com/chdb-io/chdb-go/v2/chdb/driver"
 	mycontentapi "github.com/desain-gratis/common/delivery/mycontent-api"
@@ -30,26 +31,27 @@ const (
 )
 
 func main() {
-	ctx, cancel := context.WithCancelCause(context.Background())
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
 
 	router := httprouter.New()
 
-	enableSchedulerModule(ctx, router)
-
 	wg := new(sync.WaitGroup)
+
+	enableSchedulerModule(ctx, wg, router)
 
 	go startHttpListener(ctx, wg, router, httpPublicAddress)
 
-	sigint := make(chan os.Signal, 1)
-	signal.Notify(sigint, os.Interrupt)
 	log.Info().Msgf("waiting for sigint")
-	<-sigint
-	cancel(errors.New("server closed"))
+
+	<-ctx.Done()
+
 	wg.Wait()
+
 	log.Info().Msgf("bye bye")
 }
 
-func enableSchedulerModule(ctx context.Context, router *httprouter.Router) {
+func enableSchedulerModule(ctx context.Context, wg *sync.WaitGroup, router *httprouter.Router) {
 	defaultNamespace := "deployd"
 
 	chDB, err := sql.Open("chdb", "session=/data/deployd_scheduler/scheduler.chdb")
@@ -78,10 +80,29 @@ func enableSchedulerModule(ctx context.Context, router *httprouter.Router) {
 	}
 
 	// Start the raft engine
-	err = raftwrapper.Start(ctx, scheduler.OnBecomingRaftLeader)
+	// use context.Background() for graceful shutdown (todo: might need to move it inside)
+	err = raftwrapper.Start(scheduler.OnBecomingRaftLeader)
 	if err != nil {
 		log.Fatal().Msgf("err running replicated scheduler: %v", err)
 	}
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+
+		<-ctx.Done()
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		log.Info().Msgf("MAIN: shutting down the raft scheduler..")
+		if err := raftwrapper.Shutdown(ctx); err != nil {
+			log.Err(err).Msgf("MAIN: raft scheduler")
+			return
+		}
+
+		log.Info().Msgf("MAIN: raft wrapper has been shut down")
+	}()
 
 	recurringTaskHandler := mycontentapi.New(scheduler.RecurringTaskUsecase, publicBaseURL+"/task", nil)
 	taskExecutionHandler := mycontentapi.New(scheduler.TaskExecutionUsecase, publicBaseURL+"/task/instance", []string{"queue_id"})

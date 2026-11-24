@@ -45,14 +45,11 @@ func startHttpListener(ctx context.Context, wg *sync.WaitGroup, router *httprout
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
-		log.Info().Msgf("shutting down HTTP server..")
+		log.Info().Msgf("shutting down the main HTTP server..")
 		if err := server.Shutdown(ctx); err != nil {
 			log.Err(err).Msgf("HTTP server shutdown")
 		}
 	}()
-
-	// TODO: maybe can use this for more graceful handling
-	// server.RegisterOnShutdown()
 
 	log.Info().Msgf("serving at %v", server.Addr)
 	if err := server.ListenAndServe(); err != http.ErrServerClosed {

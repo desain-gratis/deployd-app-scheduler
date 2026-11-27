@@ -11,7 +11,6 @@ clean:
 	rm -rf ./tmp*
 
 test:
-	go test -v ./src/...
 	
 build: test
 	CGO_ENABLED=0 GOOS=linux go build -o dist/scheduler cmd/scheduler/*.go

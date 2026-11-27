@@ -13,6 +13,7 @@ import (
 	mycontentapi "github.com/desain-gratis/common/delivery/mycontent-api"
 	schedulerapi "github.com/desain-gratis/common/delivery/scheduler-api"
 	runneretcd "github.com/desain-gratis/common/lib/raft/runner-etcd"
+	entity "github.com/desain-gratis/common/types/entity/scheduler"
 	"github.com/julienschmidt/httprouter"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
@@ -70,9 +71,11 @@ func enableSchedulerModule(ctx context.Context, wg *sync.WaitGroup, router *http
 		log.Fatal().Msgf("err running raft: %v", err)
 	}
 
-	_ = scheduler.Queue(raftwrapper, logger).
+	_ = scheduler.Queue(raftwrapper, "/var/log/deployd_scheduler/queue").
 		AddFunction(ctx, "sendInvoice()", 30, sendInvoice).
-		AddFunction(ctx, "echoReverse()", 30, echoReverse)
+		AddFunction(ctx, "echoReverse()", 30, echoReverse).
+		AddFunction(ctx, "longRunning()", 30, longRunning).
+		WithLogProducer(logInject)
 
 	err = scheduler.StartWorker(ctx, raftwrapper)
 	if err != nil {
@@ -107,6 +110,12 @@ func enableSchedulerModule(ctx context.Context, wg *sync.WaitGroup, router *http
 	recurringTaskHandler := mycontentapi.New(scheduler.RecurringTaskUsecase, publicBaseURL+"/task", nil)
 	taskExecutionHandler := mycontentapi.New(scheduler.TaskExecutionUsecase, publicBaseURL+"/task/instance", []string{"queue_id"})
 
+	host := os.Getenv("DEPLOYD_HOST")
+	taskExecutionHandler.WithPostProcess(func(t *entity.TaskExecution) {
+		// todo: make proper later
+		t.LogURL = "http://" + host + httpPublicAddress + "/task/log?queue_id=" + t.QueueID + "&task_id=" + t.Id
+	})
+
 	httpHandler := scheduler.HttpHandler(raftwrapper)
 	router.GET("/hello", httpHandler.Hello)
 
@@ -121,4 +130,7 @@ func enableSchedulerModule(ctx context.Context, wg *sync.WaitGroup, router *http
 	router.GET("/task/hourly", httpHandler.GetHourlyCount)
 
 	router.GET("/task", taskExecutionHandler.Get) // todo: integrate with httpAPI to make it consistent
+
+	router.GET("/task/log/tail", httpHandler.TailLog(ctx))
+	router.GET("/task/log", httpHandler.TailLog(ctx)) // todo: implement
 }

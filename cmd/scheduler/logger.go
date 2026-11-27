@@ -4,17 +4,9 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-
-	"gopkg.in/natefinch/lumberjack.v2"
 )
 
-func logger(id string) *slog.Logger {
-	outLog := &lumberjack.Logger{
-		Filename: "/var/log/deployd_scheduler/queue/" + id + "/log.log", // TODO: id validation / log directory validation
-	}
-
-	logger := slog.New(slog.NewJSONHandler(outLog, nil))
-
+func logInject(logger *slog.Logger) {
 	if value := os.Getenv("DEPLOYD_HOST"); value != "" {
 		logger = logger.With("host", value)
 	}
@@ -35,5 +27,4 @@ func logger(id string) *slog.Logger {
 		logger = logger.With("svc_commit", fmt.Sprintf("%.6s", value))
 	}
 
-	return logger
 }

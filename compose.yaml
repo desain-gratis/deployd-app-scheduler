@@ -5,6 +5,7 @@ services:
     environment:
       TZ: Asia/Jakarta
       DEPLOYD_RAFT: /etc/deployd_scheduler/etcd-raft.yaml
+      DEPLOYD_HOST: scheduler1
     volumes:
       - ./src/config/raft1.yml:/etc/deployd_scheduler/etcd-raft.yaml
       - ./tmp1:/tmp
@@ -17,6 +18,7 @@ services:
     environment:
       TZ: Asia/Jakarta
       DEPLOYD_RAFT: /etc/deployd_scheduler/etcd-raft.yaml
+      DEPLOYD_HOST: scheduler2
     volumes:
       - ./src/config/raft2.yml:/etc/deployd_scheduler/etcd-raft.yaml
       - ./tmp2:/tmp
@@ -29,6 +31,7 @@ services:
     environment:
       TZ: Asia/Jakarta
       DEPLOYD_RAFT: /etc/deployd_scheduler/etcd-raft.yaml
+      DEPLOYD_HOST: scheduler3
     volumes:
       - ./src/config/raft3.yml:/etc/deployd_scheduler/etcd-raft.yaml
       - ./tmp3:/tmp

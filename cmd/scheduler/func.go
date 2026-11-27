@@ -17,6 +17,22 @@ func sendInvoice(ctx context.Context, input any) (any, error) {
 	return "BERHAZIL", nil
 }
 
+func longRunning(ctx context.Context, input any) (any, error) {
+	taskExec := schedulerapi.GetTaskExecutionView(ctx).TaskDefinition()
+	log := schedulerapi.GetLogger(ctx)
+
+	for i := range 50 {
+		if ctx.Err() != nil {
+			return "SHORT SHORT MAN", nil
+		}
+
+		log.Info(fmt.Sprintf("This is a long running task id=%v schedule=%v count=%v", taskExec.Id, taskExec.ScheduledRunAt.Truncate(1*time.Second), i+1))
+		time.Sleep(1 * time.Second)
+	}
+
+	return "LONG LONG MAN", nil
+}
+
 func echoReverse(ctx context.Context, input any) (any, error) {
 	log := schedulerapi.GetLogger(ctx)
 

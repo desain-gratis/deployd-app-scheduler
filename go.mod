@@ -6,7 +6,7 @@ go 1.26.0
 
 require (
 	github.com/chdb-io/chdb-go/v2 v2.2.0
-	github.com/desain-gratis/common v0.0.0-20261128095157-ba7ca7d476b6
+	github.com/desain-gratis/common v0.0.0-20261128115548-5b3463e2824e
 	github.com/julienschmidt/httprouter v1.3.0
 	github.com/rs/zerolog v1.34.0
 )

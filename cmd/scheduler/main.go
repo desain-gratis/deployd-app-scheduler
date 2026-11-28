@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"database/sql"
-	"net/url"
 	"os"
 	"os/signal"
 	"sync"
@@ -14,7 +13,6 @@ import (
 	mycontentapi "github.com/desain-gratis/common/delivery/mycontent-api"
 	schedulerapi "github.com/desain-gratis/common/delivery/scheduler-api"
 	runneretcd "github.com/desain-gratis/common/lib/raft/runner-etcd"
-	entity "github.com/desain-gratis/common/types/entity/scheduler"
 	"github.com/julienschmidt/httprouter"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
@@ -125,45 +123,6 @@ func enableSchedulerModule(ctx context.Context, wg *sync.WaitGroup, router *http
 	recurringTaskHandler := mycontentapi.New(scheduler.RecurringTaskUsecase, publicBaseURL+"/task", nil)
 	taskExecutionHandler := mycontentapi.New(scheduler.TaskExecutionUsecase, publicBaseURL+"/task/instance", []string{"queue_id"})
 	workerHandler := mycontentapi.New(scheduler.WorkerUsecase, publicBaseURL+"/worker", nil)
-
-	// get all registered/available worker
-	workers, err := scheduler.WorkerUsecase.Get(ctx, defaultNamespace, nil, "")
-	if err != nil {
-		log.Fatal().Msgf("failed to get workers")
-	}
-
-	workersCache := &sync.Map{}
-	for _, w := range workers {
-		workersCache.Store(w.IdInt, w)
-	}
-
-	taskExecutionHandler = taskExecutionHandler.WithPostProcess(func(t *entity.TaskExecution) {
-		if t.AssignmentState == nil {
-			return
-		}
-
-		ww, ok := workersCache.Load(t.AssignmentState.AssignedTo)
-		if !ok {
-			return
-		}
-
-		w, ok := ww.(*entity.Worker)
-		if !ok {
-			return
-		}
-
-		lu, err := url.Parse(w.LogUrl)
-		if err != nil {
-			return
-		}
-
-		q := lu.Query()
-		q.Set("queue_id", t.QueueID)
-		q.Set("task_id", t.Id)
-		lu.RawQuery = q.Encode()
-
-		t.LogURL = lu.String()
-	})
 
 	httpHandler := scheduler.HttpHandler(raftwrapper)
 	router.GET("/hello", httpHandler.Hello)

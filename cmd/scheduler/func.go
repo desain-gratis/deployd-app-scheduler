@@ -26,7 +26,7 @@ func longRunning(ctx context.Context, input any) (any, error) {
 	for i := range durationSec {
 		err := ctx.Err()
 		if err != nil {
-			log.Info(fmt.Sprintf("I've been cancelled ma boy: %v", err.Error()))
+			log.Error(fmt.Sprintf("I've been cancelled ma boyx: %v", err.Error()))
 			return "SHORT SHORT MAN", nil
 		}
 

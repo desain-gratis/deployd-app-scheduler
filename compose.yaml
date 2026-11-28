@@ -5,7 +5,7 @@ services:
     environment:
       TZ: Asia/Jakarta
       DEPLOYD_RAFT: /etc/deployd_scheduler/etcd-raft.yaml
-      DEPLOYD_HOST: scheduler1
+      WORKER_FQDN: http://localhost:9501
     volumes:
       - ./src/config/raft1.yml:/etc/deployd_scheduler/etcd-raft.yaml
       - ./tmp1:/tmp
@@ -18,7 +18,7 @@ services:
     environment:
       TZ: Asia/Jakarta
       DEPLOYD_RAFT: /etc/deployd_scheduler/etcd-raft.yaml
-      DEPLOYD_HOST: scheduler2
+      WORKER_FQDN: http://localhost:9502
     volumes:
       - ./src/config/raft2.yml:/etc/deployd_scheduler/etcd-raft.yaml
       - ./tmp2:/tmp
@@ -31,7 +31,7 @@ services:
     environment:
       TZ: Asia/Jakarta
       DEPLOYD_RAFT: /etc/deployd_scheduler/etcd-raft.yaml
-      DEPLOYD_HOST: scheduler3
+      WORKER_FQDN: http://localhost:9503
     volumes:
       - ./src/config/raft3.yml:/etc/deployd_scheduler/etcd-raft.yaml
       - ./tmp3:/tmp

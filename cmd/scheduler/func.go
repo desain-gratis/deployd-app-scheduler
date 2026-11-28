@@ -21,7 +21,9 @@ func longRunning(ctx context.Context, input any) (any, error) {
 	taskExec := schedulerapi.GetTaskExecutionView(ctx).TaskDefinition()
 	log := schedulerapi.GetLogger(ctx)
 
-	for i := range 50 {
+	durationSec := 5 * 60
+
+	for i := range durationSec {
 		if ctx.Err() != nil {
 			return "SHORT SHORT MAN", nil
 		}

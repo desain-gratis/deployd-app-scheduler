@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"net/url"
 	"os"
 	"os/signal"
 	"sync"
@@ -60,7 +61,14 @@ func enableSchedulerModule(ctx context.Context, wg *sync.WaitGroup, router *http
 		log.Fatal().Msgf("UHUY %v", err)
 	}
 
-	scheduler, err := schedulerapi.NewReplicatedScheduler(ctx, defaultNamespace, chDB)
+	// "public"-ly accessible worker log address (either from private network or public)
+	// since it's for individiual worker, it should be unique per host or worker instance (not the common one accessible from load-balancer)
+	workerFQDN := os.Getenv("WORKER_FQDN")
+	schConfig := &schedulerapi.Config{
+		LogUrl:     workerFQDN + "/task/log",
+		LogTailUrl: workerFQDN + "/task/log/tail",
+	}
+	scheduler, err := schedulerapi.NewReplicatedScheduler(ctx, defaultNamespace, chDB, schConfig)
 	if err != nil {
 		log.Fatal().Msgf("FAILED init scheduler: %v", scheduler)
 	}
@@ -71,6 +79,13 @@ func enableSchedulerModule(ctx context.Context, wg *sync.WaitGroup, router *http
 		log.Fatal().Msgf("err running raft: %v", err)
 	}
 
+	// Start the raft engine
+	// use context.Background() for graceful shutdown (todo: might need to move it inside)
+	err = raftwrapper.Start(scheduler.OnBecomingRaftLeader)
+	if err != nil {
+		log.Fatal().Msgf("err running replicated scheduler: %v", err)
+	}
+
 	_ = scheduler.Queue(raftwrapper, "/var/log/deployd_scheduler/queue").
 		AddFunction(ctx, "sendInvoice()", 30, sendInvoice).
 		AddFunction(ctx, "echoReverse()", 30, echoReverse).
@@ -79,14 +94,14 @@ func enableSchedulerModule(ctx context.Context, wg *sync.WaitGroup, router *http
 
 	err = scheduler.StartWorker(ctx, raftwrapper)
 	if err != nil {
-		log.Fatal().Msgf("failed to start scheduler worker")
+		log.Fatal().Msgf("failed to start scheduler worker: %v", err)
 	}
 
-	// Start the raft engine
-	// use context.Background() for graceful shutdown (todo: might need to move it inside)
-	err = raftwrapper.Start(scheduler.OnBecomingRaftLeader)
+	// Update availability
+	// todo: find more connvenient pattern
+	err = scheduler.UpdateAvailability(ctx, raftwrapper)
 	if err != nil {
-		log.Fatal().Msgf("err running replicated scheduler: %v", err)
+		log.Fatal().Msgf("err failed to join cluster: %v", err)
 	}
 
 	wg.Add(1)
@@ -109,11 +124,45 @@ func enableSchedulerModule(ctx context.Context, wg *sync.WaitGroup, router *http
 
 	recurringTaskHandler := mycontentapi.New(scheduler.RecurringTaskUsecase, publicBaseURL+"/task", nil)
 	taskExecutionHandler := mycontentapi.New(scheduler.TaskExecutionUsecase, publicBaseURL+"/task/instance", []string{"queue_id"})
+	workerHandler := mycontentapi.New(scheduler.WorkerUsecase, publicBaseURL+"/worker", nil)
 
-	host := os.Getenv("DEPLOYD_HOST")
-	taskExecutionHandler.WithPostProcess(func(t *entity.TaskExecution) {
-		// todo: make proper later
-		t.LogURL = "http://" + host + httpPublicAddress + "/task/log?queue_id=" + t.QueueID + "&task_id=" + t.Id
+	// get all registered/available worker
+	workers, err := scheduler.WorkerUsecase.Get(ctx, defaultNamespace, nil, "")
+	if err != nil {
+		log.Fatal().Msgf("failed to get workers")
+	}
+
+	workersCache := &sync.Map{}
+	for _, w := range workers {
+		workersCache.Store(w.IdInt, w)
+	}
+
+	taskExecutionHandler = taskExecutionHandler.WithPostProcess(func(t *entity.TaskExecution) {
+		if t.AssignmentState == nil {
+			return
+		}
+
+		ww, ok := workersCache.Load(t.AssignmentState.AssignedTo)
+		if !ok {
+			return
+		}
+
+		w, ok := ww.(*entity.Worker)
+		if !ok {
+			return
+		}
+
+		lu, err := url.Parse(w.LogUrl)
+		if err != nil {
+			return
+		}
+
+		q := lu.Query()
+		q.Set("queue_id", t.QueueID)
+		q.Set("task_id", t.Id)
+		lu.RawQuery = q.Encode()
+
+		t.LogURL = lu.String()
 	})
 
 	httpHandler := scheduler.HttpHandler(raftwrapper)
@@ -130,6 +179,7 @@ func enableSchedulerModule(ctx context.Context, wg *sync.WaitGroup, router *http
 	router.GET("/task/hourly", httpHandler.GetHourlyCount)
 
 	router.GET("/task", taskExecutionHandler.Get) // todo: integrate with httpAPI to make it consistent
+	router.GET("/worker", workerHandler.Get)
 
 	router.GET("/task/log/tail", httpHandler.TailLog(ctx))
 	router.GET("/task/log", httpHandler.TailLog(ctx)) // todo: implement
